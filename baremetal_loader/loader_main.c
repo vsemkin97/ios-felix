@@ -11,7 +11,7 @@
 #define KERNEL_VIRT_BASE    0xfffffff007004000ULL
 #define PAGE_SIZE_MAX       0x4000ULL
 #define BOOT_LINE_LENGTH    608
-#define NVRAM_BANK_SIZE     0x10000
+#define NVRAM_BANK_SIZE     0x2000u
 
 #define FB_OUTER_BASE       0xFC000000ULL
 
@@ -390,11 +390,8 @@ felix_baremetal_main(uint64_t fdt_addr)
 	}
 	con_hex2("SEGS", "copied=", seg_copied, "top=", (uint32_t)kern_hi);
 
-	/* 4. Device Tree & boot_args placement */
+	/* 4. Device Tree placement */
 	uint64_t dt_pa = (kern_hi + 0x3fffULL) & ~0x3fffULL;
-	uint64_t dt_max = 0x10000;
-	uint64_t ba_pa = dt_pa + dt_max;
-	uint64_t top = ba_pa + PAGE_SIZE_MAX;
 
 	/* 5. Build Apple Device Tree */
 	struct dt_writer w = { .base = (uint8_t *)dt_pa, .cur = (uint8_t *)dt_pa, .depth = 0 };
@@ -502,7 +499,10 @@ felix_baremetal_main(uint64_t fdt_addr)
 	dt_end(&w); /* device-tree */
 
 	uint32_t dt_len = (uint32_t)(w.cur - w.base);
+	uint64_t ba_pa = (dt_pa + dt_len + PAGE_SIZE_MAX - 1) & ~(PAGE_SIZE_MAX - 1);
+	uint64_t top = ba_pa + PAGE_SIZE_MAX;
 	con_hex2("DEVTREE", "pa=", (uint32_t)dt_pa, "len=", dt_len);
+	con_hex2("BOOTARGS", "pa=", (uint32_t)ba_pa, "top=", (uint32_t)top);
 
 	/* 6. Build boot_args */
 	struct boot_args *ba = (struct boot_args *)ba_pa;

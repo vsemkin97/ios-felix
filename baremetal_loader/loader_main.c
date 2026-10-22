@@ -556,7 +556,17 @@ felix_baremetal_main(uint64_t fdt_addr)
 	l1[stub >> 30] = (uint64_t)(0xfffffff007e7c000ULL + slide) | 3;
 	l2[(stub >> 21) & 0x1ff] = (stub & ~0x1fffffULL) | 0x601;
 
-	/* 9. Fix Bug in _loader_jump: skip PE_parse_boot_argn which faults before PE_init_platform */
+	/* 9. Fix Bugs in _loader_jump:
+	 * a) Bypass _gic_v3_irq_quiesce which calls cpu_number() -> current_thread() -> faults on NULL TPIDR_EL1
+	 * b) Bypass _gic_v3_irq_cpu_shutdown
+	 * c) Bypass PE_parse_boot_argn which faults before PE_init_platform
+	 */
+	uint64_t gic_quiesce_pa = 0xfffffff00747464cULL + slide;
+	*(volatile uint32_t *)gic_quiesce_pa = 0xd65f03c0; /* ret */
+
+	uint64_t gic_shutdown_pa = 0xfffffff0074746d8ULL + slide;
+	*(volatile uint32_t *)gic_shutdown_pa = 0xd65f03c0; /* ret */
+
 	uint64_t pe_parse_pa = 0xfffffff007472a6cULL + slide;
 	*(volatile uint32_t *)pe_parse_pa = 0x52800000; /* mov w0, #0 (bypasses faulting call) */
 

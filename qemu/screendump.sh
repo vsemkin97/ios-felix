@@ -1,9 +1,10 @@
 #!/bin/bash
 # Save the screen of a running QEMU (started with -device ramfb -monitor tcp:127.0.0.1:4444,server,nowait) as a PNG.
 # usage: screendump.sh [out.png]      (FULL=1: the whole mode, not only the phone-sized corner)
-out=$(realpath -m "${1:-$(dirname "$(readlink -f "$0")")/../logs/qemu-screen.png}")   # QEMU writes it: absolute
+TARGET="${1:-$(dirname "$0")/../logs/qemu-screen.png}"
+out=$(python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "$TARGET")
 mkdir -p "$(dirname "$out")"
-here=$(dirname "$(readlink -f "$0")")
+here=$(dirname "$0")
 python3 - "$out" "${QEMU_INSTANCE:-$(cat "$here/instance" 2>/dev/null || echo 0)}" <<'PY'
 import socket, struct, sys, time, zlib, os
 out = sys.argv[1]; ppm = out + '.ppm'

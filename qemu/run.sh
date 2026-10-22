@@ -26,11 +26,24 @@ cp -f "${QEMU_VARS:-$VARS_DEFAULT}" vars.fd 2>/dev/null
 # the one built here, or else the one that comes with the repository
 L=../xnuloader/loader.efi; [ -f $L ] || L=../prebuilt/loader.efi
 mkdir -p esp/EFI/BOOT && cp -f $L esp/EFI/BOOT/BOOTAA64.EFI
-timeout "$T" qemu-system-aarch64 -M virt,gic-version=3 -cpu cortex-a76 -smp ${QEMU_SMP:-1} -m ${QEMU_MEM:-6G} \
+DISP=${QEMU_DISPLAY:-cocoa}
+# Kill any stale QEMU process occupying port 4444
+killall qemu-system-aarch64 2>/dev/null || true
+sleep 0.5
+
+if [ "$T" = "0" ] || [ "$T" = "gui" ] || [ "$T" = "inf" ]; then
+	TIMEOUT_CMD=()
+else
+	TIMEOUT_CMD=(timeout "$T")
+fi
+
+"${TIMEOUT_CMD[@]}" qemu-system-aarch64 -M virt,gic-version=3 -cpu cortex-a76 -smp ${QEMU_SMP:-1} -m ${QEMU_MEM:-6G} \
   -accel tcg,tb-size=${QEMU_TB_MB:-384} \
   -drive if=pflash,format=raw,readonly=on,file="$EFI" \
   -drive if=pflash,format=raw,file=vars.fd \
   -drive file=fat:rw:esp,format=raw,if=virtio \
   -device loader,file=payload.bin,addr=0xF0000000,force-raw=on \
   -device ramfb \
-  -display none -serial stdio -monitor none -no-reboot "$@" 2>&1
+  -display "$DISP" -serial stdio \
+  -monitor tcp:127.0.0.1:4444,server,nowait \
+  -no-reboot "$@" 2>&1

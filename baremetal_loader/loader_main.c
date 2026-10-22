@@ -263,6 +263,7 @@ on_xnu_exception(uint64_t log_pa, uint64_t log_len, uint64_t code,
 		else con_str("STAGE", "Checkpoint reached");
 		con_hex("SP", sp);
 		con_hex("LR", lr);
+		con_hex("PAR", far);
 	} else {
 		/* True exception: Red background */
 		con_clear(RED);
@@ -535,7 +536,7 @@ felix_baremetal_main(uint64_t fdt_addr)
 		    p[4] == 'D' && p[5] == 'R' && p[6] == 'S' && p[7] == 'T') {
 			uint64_t *slot = (uint64_t *)p;
 			slot[1] = (uint64_t)&loader_return_stub;
-			slot[2] = 7; /* Checkpoint 7: arm_init C entry reached */
+			slot[2] = 6; /* Checkpoint 6: common_start ret reached with PAR query */
 			slot[3] = slide;
 			patched = 1;
 			break;
@@ -543,28 +544,20 @@ felix_baremetal_main(uint64_t fdt_addr)
 		p += 8;
 	}
 
-	/* common_start at 0xfffffff0074614a8..4b0 executes naturally:
-	 * add x0, x20, x22 (0x8b160280)
-	 * sub x0, x0, x23  (0xcb170000)
-	 * ret              (0xd65f03c0)
-	 */
-	*(volatile uint32_t *)(0xfffffff0074614a8ULL + slide) = 0x8b160280; /* add x0, x20, x22 */
-	*(volatile uint32_t *)(0xfffffff0074614acULL + slide) = 0xcb170000; /* sub x0, x0, x23 */
-	*(volatile uint32_t *)(0xfffffff0074614b0ULL + slide) = 0xd65f03c0; /* ret */
-
-	/* 8. Test STAGE 07: Hook _arm_init entry (0xfffffff007453994) to verify ret into TTBR1 */
-	static const uint32_t chk7_trampoline[] = {
-		0x910003e7, 0xd2873490, 0xf2b408b0, 0xd61f0200,
-		0xd538100b, 0x927ff96b, 0xd518100b, 0xd5033fdf,
-		0xaa1f03e0, 0xaa1f03e1, 0xd2800042, 0xd28000e3,
-		0xaa1e03e6, 0x1005f149, 0xf9400529, 0xd61f0120,
+	/* Test STAGE 06: verify common_start ret with hardware MMU AT translation query */
+	static const uint32_t chk6_at_trampoline[] = {
+		0xd2873280, 0xf2a0e8a0, 0xf2dffe00, 0xf2ffffe0,
+		0xd5087800, 0xd5033fdf, 0xd5387405, 0xd2800000,
+		0xd2800001, 0xd2800042, 0xd28000c3, 0xaa1e03e6,
+		0x910003e7, 0xd538100b, 0x927ff96b, 0xd518100b,
+		0xd5033fdf, 0x10ff1829, 0xf9400529, 0xd61f0120,
 	};
-	volatile uint32_t *chk7_dst = (volatile uint32_t *)(0xfffffff007453994ULL + slide);
-	for (size_t i = 0; i < sizeof(chk7_trampoline) / sizeof(chk7_trampoline[0]); i++) {
-		chk7_dst[i] = chk7_trampoline[i];
+	volatile uint32_t *chk6_dst = (volatile uint32_t *)(0xfffffff0074614a8ULL + slide);
+	for (size_t i = 0; i < sizeof(chk6_at_trampoline) / sizeof(chk6_at_trampoline[0]); i++) {
+		chk6_dst[i] = chk6_at_trampoline[i];
 	}
 
-	con_hex2("STUB", "patched=", patched, "chkpt=", 7);
+	con_hex2("STUB", "patched=", patched, "chkpt=", 6);
 	con_hex("ENTRY", entry_pa);
 	con_str("READY", "Jumping to XNU kernel in 2s...");
 

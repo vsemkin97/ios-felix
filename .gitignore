@@ -19,6 +19,18 @@
 !/uefi/
 !/prebuilt/
 !/wifi/
+!/baremetal_loader/
+
+/baremetal_loader/*.o
+/baremetal_loader/*.elf
+/baremetal_loader/*.bin
+/baremetal_loader/*.lz4
+/baremetal_loader/*.img
+/baremetal_loader/Image
+/baremetal_loader/kernel.macho
+/baremetal_loader/test_*.s
+/baremetal_loader/chkpt_test.s
+/baremetal_loader/tramp.s
 
 __pycache__/
 *~

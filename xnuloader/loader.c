@@ -553,6 +553,15 @@ static const struct platform platform_redwood = {
 	.fb_base = 0xE1000000,
 };
 
+static const struct platform platform_felix = {
+	/* Google Pixel Fold (Tensor G2 / GS201) */
+	.name = "felix", .io_base = 0x10000000, .io_size = 0x10000000,
+	.gic_dist = 0x10400000, .gic_redist = 0x10440000, .uart = 0, .log_other_cpu = 1,
+	.cores = 8, .core_shift = 8,
+	.small_cores = 0x0f,
+	.fb_base = 0xFC000000,
+};
+
 /*
  * The devices the loader knows, told apart by the framebuffer base their UEFI reports. A port to another
  * device adds its description here (common/new-device.sh writes a starting point, docs/PORTING.md says
@@ -560,6 +569,7 @@ static const struct platform platform_redwood = {
  */
 static const struct platform *const platforms[] = {
 	&platform_redwood,
+	&platform_felix,
 };
 
 /* ------------------------------------------------------------------------ */

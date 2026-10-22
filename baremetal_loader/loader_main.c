@@ -535,7 +535,7 @@ felix_baremetal_main(uint64_t fdt_addr)
 		    p[4] == 'D' && p[5] == 'R' && p[6] == 'S' && p[7] == 'T') {
 			uint64_t *slot = (uint64_t *)p;
 			slot[1] = (uint64_t)&loader_return_stub;
-			slot[2] = 10; /* Checkpoint 10: arm_init C entry reached */
+			slot[2] = 6; /* Checkpoint 6: common_start ret reached */
 			slot[3] = slide;
 			patched = 1;
 			break;
@@ -543,52 +543,33 @@ felix_baremetal_main(uint64_t fdt_addr)
 		p += 8;
 	}
 
-	/* 8. Install Trampoline at _loader_checkpoint (0xfffffff007472bf0):
-	 * Safely handles checkpoints and intercepts exceptions via TTBR0 physical PC transition
-	 */
-	static const uint32_t chkpt_trampoline[] = {
-		0x58000489, 0xf9400928, 0xeb00011f, 0x54000261,
-		0xf9400d30, 0xf9400529, 0x10000071, 0x8b100231,
-		0xd61f0220, 0xd538100b, 0x927ff96b, 0xd518100b,
-		0xd5033fdf, 0xd2800000, 0xd2800001, 0xd2800042,
-		0xaa0803e3, 0xaa1f03e4, 0xaa1f03e5, 0xaa1e03e6,
-		0x910003e7, 0xd61f0120, 0xd65f03c0, 0x580001a9,
-		0xf9400d30, 0xf9400529, 0x10000071, 0x8b100231,
-		0xd61f0220, 0xd538100b, 0x927ff96b, 0xd518100b,
-		0xd5033fdf, 0xd2800022, 0xd61f0120, 0x00000000,
-		0x0745f7f0, 0xfffffff0,
+	/* 8. Test STAGE 06: verify if common_start reaches ret at 0xfffffff0074614a8 */
+	static const uint32_t chk6_trampoline[] = {
+		0xd2800000, /* mov x0, #0 */
+		0xd2800001, /* mov x1, #0 */
+		0xd2800042, /* mov x2, #2 (code=2, checkpoint) */
+		0xd28000c3, /* mov x3, #6 (stage 6) */
+		0xaa1e03e6, /* mov x6, x30 (LR) */
+		0x910003e7, /* mov x7, sp (SP) */
+		0xd538100b, /* mrs x11, SCTLR_EL1 */
+		0x927ff96b, /* and x11, x11, #~1 (MMU off) */
+		0xd518100b, /* msr SCTLR_EL1, x11 */
+		0xd5033fdf, /* isb */
+		0x10ff1909, /* adr x9, _loader_stub_slot (offset -0x1ce0) */
+		0xf9400529, /* ldr x9, [x9, #8] (stub PA) */
+		0xd61f0120, /* br x9 */
 	};
-	volatile uint32_t *chkpt_dst = (volatile uint32_t *)(0xfffffff007472bf0ULL + slide);
-	for (size_t i = 0; i < sizeof(chkpt_trampoline) / sizeof(chkpt_trampoline[0]); i++) {
-		chkpt_dst[i] = chkpt_trampoline[i];
+	volatile uint32_t *chk6_dst = (volatile uint32_t *)(0xfffffff0074614a8ULL + slide);
+	for (size_t i = 0; i < sizeof(chk6_trampoline) / sizeof(chk6_trampoline[0]); i++) {
+		chk6_dst[i] = chk6_trampoline[i];
 	}
-
-	/* Hook _LowExceptionVectorBase at 0xfffffff00745f79c:
-	 * Right after ESR, ELR, FAR, LR, SP are saved, branch directly to test_exception
-	 * 0x14004d2c = b 0xfffffff007472c4c (test_exception)
-	 */
-	uint64_t exc_hook_pa = 0xfffffff00745f79cULL + slide;
-	*(volatile uint32_t *)exc_hook_pa = 0x14004d2c;
-
-	/* Keep VBAR_EL1 as _LowExceptionVectorBase so all early exceptions are caught */
-	uint64_t vbar_patch_pa = 0xfffffff0074613d0ULL + slide;
-	*(volatile uint32_t *)vbar_patch_pa = 0xd503201f; /* nop */
-
-	/* common_start at 0xfffffff0074614a8..4b0 executes naturally:
-	 * add x0, x20, x22 (0x8b160280)
-	 * sub x0, x0, x23  (0xcb170000)
-	 * ret              (0xd65f03c0)
-	 */
-	*(volatile uint32_t *)(0xfffffff0074614a8ULL + slide) = 0x8b160280; /* add x0, x20, x22 */
-	*(volatile uint32_t *)(0xfffffff0074614acULL + slide) = 0xcb170000; /* sub x0, x0, x23 */
-	*(volatile uint32_t *)(0xfffffff0074614b0ULL + slide) = 0xd65f03c0; /* ret */
 
 	/* arm_init entry at 0xfffffff007453994 executes naturally */
 	uint64_t arm_init_pa = 0xfffffff007453994ULL + slide;
 	*(volatile uint32_t *)arm_init_pa = 0xd10343ff; /* sub sp, sp, #0xd0 */
 	*(volatile uint32_t *)(arm_init_pa + 4) = 0xa9076ffc; /* stp x28, x27, [sp, #0x70] */
 
-	con_hex2("STUB", "patched=", patched, "chkpt=", 10);
+	con_hex2("STUB", "patched=", patched, "chkpt=", 6);
 	con_hex("ENTRY", entry_pa);
 	con_str("READY", "Jumping to XNU kernel in 2s...");
 

@@ -544,14 +544,22 @@ felix_baremetal_main(uint64_t fdt_addr)
 		p += 8;
 	}
 
-	/* 8. Restore common_start at 0xfffffff0074614a8:
-	 * add x0, x20, x22 (0x8b160280)
-	 * sub x0, x0, x23  (0xcb170000)
-	 * ret              (0xd65f03c0)
-	 */
-	*(volatile uint32_t *)(0xfffffff0074614a8ULL + slide) = 0x8b160280;
-	*(volatile uint32_t *)(0xfffffff0074614acULL + slide) = 0xcb170000;
-	*(volatile uint32_t *)(0xfffffff0074614b0ULL + slide) = 0xd65f03c0;
+	/* 8. Test STAGE 06: verify jumping to loader_return_stub (0x800018a0) with MMU ON */
+	static const uint32_t chk6_mmu_on[] = {
+		0xd2800000, /* mov  x0, #0 */
+		0xd2800001, /* mov  x1, #0 */
+		0xd2800042, /* mov  x2, #2 (checkpoint) */
+		0xd28000c3, /* mov  x3, #6 (stage 6) */
+		0xaa1e03e6, /* mov  x6, x30 (LR) */
+		0x910003e7, /* mov  x7, sp  (SP) */
+		0xd2831409, /* mov  x9, #0x18a0 */
+		0xf2b00009, /* movk x9, #0x8000, lsl #16 */
+		0xd61f0120, /* br   x9 (0x800018a0 WITH MMU ON!) */
+	};
+	volatile uint32_t *chk6_dst = (volatile uint32_t *)(0xfffffff0074614a8ULL + slide);
+	for (size_t i = 0; i < sizeof(chk6_mmu_on) / sizeof(chk6_mmu_on[0]); i++) {
+		chk6_dst[i] = chk6_mmu_on[i];
+	}
 
 	/* 9. Patch _start_first_cpu at 0xfffffff0074612e4:
 	 * Right after _bootstrap_pagetables is built, map 0x80000000 (loader_return_stub)
@@ -589,7 +597,7 @@ felix_baremetal_main(uint64_t fdt_addr)
 	l1[2] = loader_l2_pa | 0x3;
 	l2[0] = 0x80000000ULL | 0x601;
 
-	con_hex2("STUB", "patched=", patched, "chkpt=", 10);
+	con_hex2("STUB", "patched=", patched, "chkpt=", 6);
 	con_hex("ENTRY", entry_pa);
 	con_str("READY", "Jumping to XNU kernel in 2s...");
 

@@ -536,7 +536,7 @@ felix_baremetal_main(uint64_t fdt_addr)
 		    p[4] == 'D' && p[5] == 'R' && p[6] == 'S' && p[7] == 'T') {
 			uint64_t *slot = (uint64_t *)p;
 			slot[1] = (uint64_t)&loader_return_stub;
-			slot[2] = 6; /* Checkpoint 6: common_start ret reached with PAR query */
+			slot[2] = 10; /* Checkpoint 10: arm_init() C entry reached */
 			slot[3] = slide;
 			patched = 1;
 			break;
@@ -544,20 +544,52 @@ felix_baremetal_main(uint64_t fdt_addr)
 		p += 8;
 	}
 
-	/* Test STAGE 06: verify common_start ret with hardware MMU AT translation query */
-	static const uint32_t chk6_at_trampoline[] = {
-		0xd2873280, 0xf2a0e8a0, 0xf2dffe00, 0xf2ffffe0,
-		0xd5087800, 0xd5033fdf, 0xd5387405, 0xd2800000,
-		0xd2800001, 0xd2800042, 0xd28000c3, 0xaa1e03e6,
-		0x910003e7, 0xd538100b, 0x927ff96b, 0xd518100b,
-		0xd5033fdf, 0x10ff1829, 0xf9400529, 0xd61f0120,
-	};
-	volatile uint32_t *chk6_dst = (volatile uint32_t *)(0xfffffff0074614a8ULL + slide);
-	for (size_t i = 0; i < sizeof(chk6_at_trampoline) / sizeof(chk6_at_trampoline[0]); i++) {
-		chk6_dst[i] = chk6_at_trampoline[i];
-	}
+	/* 8. Restore common_start at 0xfffffff0074614a8:
+	 * add x0, x20, x22 (0x8b160280)
+	 * sub x0, x0, x23  (0xcb170000)
+	 * ret              (0xd65f03c0)
+	 */
+	*(volatile uint32_t *)(0xfffffff0074614a8ULL + slide) = 0x8b160280;
+	*(volatile uint32_t *)(0xfffffff0074614acULL + slide) = 0xcb170000;
+	*(volatile uint32_t *)(0xfffffff0074614b0ULL + slide) = 0xd65f03c0;
 
-	con_hex2("STUB", "patched=", patched, "chkpt=", 6);
+	/* 9. Patch _start_first_cpu at 0xfffffff0074612e4:
+	 * Right after _bootstrap_pagetables is built, map 0x80000000 (loader_return_stub)
+	 * into TTBR0 Page 2 entry 0, then jump directly to common_start.
+	 */
+	volatile uint32_t *map80 = (volatile uint32_t *)(0xfffffff0074612e4ULL + slide);
+	map80[0] = 0xd280c02a; /* mov  x10, #0x601 */
+	map80[1] = 0xf2b0000a; /* movk x10, #0x8000, lsl #16 */
+	map80[2] = 0xf910032a; /* str  x10, [x25, #0x2000] (Page 2[0] = 0x80000601) */
+	map80[3] = 0x1400000d; /* b    common_start (0xfffffff007461324) */
+
+	/* 10. Patch _LowExceptionVectorBase at 0xfffffff00745f7d0:
+	 * NOP out the 4 instructions that disabled MMU while PC was in TTBR1.
+	 * Now exceptions cleanly branch to loader_return_stub at 0x800018a0 with MMU ON.
+	 */
+	volatile uint32_t *exc_patch = (volatile uint32_t *)(0xfffffff00745f7d0ULL + slide);
+	exc_patch[0] = 0xd503201f; /* nop (was mrs x9, SCTLR_EL1) */
+	exc_patch[1] = 0xd503201f; /* nop (was and x9, x9, #~1) */
+	exc_patch[2] = 0xd503201f; /* nop (was msr SCTLR_EL1, x9) */
+	exc_patch[3] = 0xd503201f; /* nop (was isb) */
+
+	/* 11. Patch _loader_jump at 0xfffffff007472a6c:
+	 * Replace "bl _PE_parse_boot_argn" with "mov w0, #0" so early checkpoints
+	 * do not crash on NULL PE_state.bootArgs before PE_init_platform runs.
+	 */
+	*(volatile uint32_t *)(0xfffffff007472a6cULL + slide) = 0x52800000; /* mov w0, #0 */
+
+	/* 12. Pre-initialize PE_state.bootArgs pointer and loader_l1/l2 tables */
+	uint64_t ba_va = KERNEL_VIRT_BASE + (ba_pa - phys_base);
+	*(volatile uint64_t *)(0xfffffff007252900ULL + slide) = ba_va;
+
+	uint64_t loader_l2_pa = 0xfffffff007e7c000ULL + slide;
+	uint64_t *l1 = (uint64_t *)(0xfffffff007e7d000ULL + slide);
+	uint64_t *l2 = (uint64_t *)(0xfffffff007e7c000ULL + slide);
+	l1[2] = loader_l2_pa | 0x3;
+	l2[0] = 0x80000000ULL | 0x601;
+
+	con_hex2("STUB", "patched=", patched, "chkpt=", 10);
 	con_hex("ENTRY", entry_pa);
 	con_str("READY", "Jumping to XNU kernel in 2s...");
 

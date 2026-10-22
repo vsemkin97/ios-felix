@@ -8,7 +8,7 @@
 #include "console.h"
 #include "identity_felix.h"
 
-#define KERNEL_VIRT_BASE    0xFFFFFFF004000000ULL
+#define KERNEL_VIRT_BASE    0xfffffff007004000ULL
 #define PAGE_SIZE_MAX       0x4000ULL
 #define BOOT_LINE_LENGTH    608
 #define NVRAM_BANK_SIZE     0x10000
@@ -519,7 +519,7 @@ felix_baremetal_main(uint64_t fdt_addr)
 	ba->video.v_width = FB_W;
 	ba->video.v_height = FB_H;
 	ba->video.v_depth = 32;
-	ba->deviceTreeP = dt_pa - slide; /* VIRTUAL address! */
+	ba->deviceTreeP = KERNEL_VIRT_BASE + (dt_pa - phys_base); /* EXACT virtual address! */
 	ba->deviceTreeLength = dt_len;
 
 	const char *cmd = "-v debug=0x8 serial=3 cpus=1";
@@ -535,7 +535,7 @@ felix_baremetal_main(uint64_t fdt_addr)
 		    p[4] == 'D' && p[5] == 'R' && p[6] == 'S' && p[7] == 'T') {
 			uint64_t *slot = (uint64_t *)p;
 			slot[1] = (uint64_t)&loader_return_stub;
-			slot[2] = 10; /* Checkpoint 10 */
+			slot[2] = 1; /* Checkpoint 1: early verify of entry into start_first_cpu */
 			slot[3] = slide;
 			patched = 1;
 			break;
@@ -585,7 +585,7 @@ felix_baremetal_main(uint64_t fdt_addr)
 	*(volatile uint32_t *)arm_init_pa = 0xd10343ff; /* sub sp, sp, #0xd0 */
 	*(volatile uint32_t *)(arm_init_pa + 4) = 0xa9076ffc; /* stp x28, x27, [sp, #0x70] */
 
-	con_hex2("STUB", "patched=", patched, "chkpt=", 10);
+	con_hex2("STUB", "patched=", patched, "chkpt=", 1);
 	con_hex("ENTRY", entry_pa);
 	con_str("READY", "Jumping to XNU kernel in 2s...");
 

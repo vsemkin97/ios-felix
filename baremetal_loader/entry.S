@@ -153,6 +153,9 @@ jump_to_kernel:
 	ic	iallu
 	dsb	sy
 	isb
+	tlbi	vmalle1
+	dsb	sy
+	isb
 
 	/* Put boot_args_pa in x0 and branch to kernel entry point */
 	mov	x19, x0             /* entry_pa */

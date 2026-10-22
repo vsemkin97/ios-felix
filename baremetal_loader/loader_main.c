@@ -535,7 +535,7 @@ felix_baremetal_main(uint64_t fdt_addr)
 		    p[4] == 'D' && p[5] == 'R' && p[6] == 'S' && p[7] == 'T') {
 			uint64_t *slot = (uint64_t *)p;
 			slot[1] = (uint64_t)&loader_return_stub;
-			slot[2] = 5; /* Checkpoint 5: MMU enabled in common_start */
+			slot[2] = 10; /* Checkpoint 10: arm_init C entry reached */
 			slot[3] = slide;
 			patched = 1;
 			break;
@@ -585,7 +585,7 @@ felix_baremetal_main(uint64_t fdt_addr)
 	*(volatile uint32_t *)arm_init_pa = 0xd10343ff; /* sub sp, sp, #0xd0 */
 	*(volatile uint32_t *)(arm_init_pa + 4) = 0xa9076ffc; /* stp x28, x27, [sp, #0x70] */
 
-	con_hex2("STUB", "patched=", patched, "chkpt=", 5);
+	con_hex2("STUB", "patched=", patched, "chkpt=", 10);
 	con_hex("ENTRY", entry_pa);
 	con_str("READY", "Jumping to XNU kernel in 2s...");
 

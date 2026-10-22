@@ -343,8 +343,8 @@ felix_baremetal_main(uint64_t fdt_addr)
 
 	con_hex2("KERNEL", "size=", (uint32_t)kernel_size, "ncmds=", mh->ncmds);
 
-	/* Memory Layout: Use 0xA0000000 (safe, unreserved normal DRAM) */
-	uint64_t phys_base = 0xA0000000ULL;
+	/* Memory Layout: Must match 2MB block offset of KERNEL_VIRT_BASE (0x4000) */
+	uint64_t phys_base = 0xA0000000ULL + (KERNEL_VIRT_BASE & (0x200000ULL - 1));
 	uint64_t win_size  = 0x50000000ULL; /* 1.25 GB */
 	uint64_t slide     = phys_base - KERNEL_VIRT_BASE;
 
@@ -390,7 +390,7 @@ felix_baremetal_main(uint64_t fdt_addr)
 	con_hex2("SEGS", "copied=", seg_copied, "top=", (uint32_t)kern_hi);
 
 	/* 4. Device Tree & boot_args placement */
-	uint64_t dt_pa = kern_hi;
+	uint64_t dt_pa = (kern_hi + 0x3fffULL) & ~0x3fffULL;
 	uint64_t dt_max = 0x10000;
 	uint64_t ba_pa = dt_pa + dt_max;
 	uint64_t top = ba_pa + PAGE_SIZE_MAX;
@@ -543,34 +543,37 @@ felix_baremetal_main(uint64_t fdt_addr)
 		p += 8;
 	}
 
-	/* 8. Zero XNU loader return BSS state so _loader_jump does not read garbage */
-	uint64_t *lr_ptr = (uint64_t *)(0xfffffff007d149c0ULL + slide);
-	for (int i = 0; i < 8; i++) lr_ptr[i] = 0;
-	*(volatile uint8_t *)(0xfffffff007d7b009ULL + slide) = 0; /* _loader_return_entered */
-
-	/* Pre-populate _loader_l1 and _loader_l2 with identity mapping for loader_return_stub */
-	uint64_t *l1 = (uint64_t *)(0xfffffff007e7d000ULL + slide);
-	uint64_t *l2 = (uint64_t *)(0xfffffff007e7c000ULL + slide);
-	for (int i = 0; i < 512; i++) { l1[i] = 0; l2[i] = 0; }
-	uint64_t stub = (uint64_t)&loader_return_stub;
-	l1[stub >> 30] = (uint64_t)(0xfffffff007e7c000ULL + slide) | 3;
-	l2[(stub >> 21) & 0x1ff] = (stub & ~0x1fffffULL) | 0x601;
-
-	/* 9. Fix Bugs in _loader_jump:
-	 * a) Bypass _gic_v3_irq_quiesce which calls cpu_number() -> current_thread() -> faults on NULL TPIDR_EL1
-	 * b) Bypass _gic_v3_irq_cpu_shutdown
-	 * c) Bypass PE_parse_boot_argn which faults before PE_init_platform
+	/* 8. Install Trampoline at _loader_checkpoint (0xfffffff007472bf0):
+	 * Safely handles checkpoints and intercepts exceptions via TTBR0 physical PC transition
 	 */
-	uint64_t gic_quiesce_pa = 0xfffffff00747464cULL + slide;
-	*(volatile uint32_t *)gic_quiesce_pa = 0xd65f03c0; /* ret */
+	static const uint32_t chkpt_trampoline[] = {
+		0x58000489, 0xf9400928, 0xeb00011f, 0x54000261,
+		0xf9400d30, 0xf9400529, 0x10000071, 0x8b100231,
+		0xd61f0220, 0xd538100b, 0x927ff96b, 0xd518100b,
+		0xd5033fdf, 0xd2800000, 0xd2800001, 0xd2800042,
+		0xaa0803e3, 0xaa1f03e4, 0xaa1f03e5, 0xaa1e03e6,
+		0x910003e7, 0xd61f0120, 0xd65f03c0, 0x580001a9,
+		0xf9400d30, 0xf9400529, 0x10000071, 0x8b100231,
+		0xd61f0220, 0xd538100b, 0x927ff96b, 0xd518100b,
+		0xd5033fdf, 0xd2800022, 0xd61f0120, 0x00000000,
+		0x0745f7f0, 0xfffffff0,
+	};
+	volatile uint32_t *chkpt_dst = (volatile uint32_t *)(0xfffffff007472bf0ULL + slide);
+	for (size_t i = 0; i < sizeof(chkpt_trampoline) / sizeof(chkpt_trampoline[0]); i++) {
+		chkpt_dst[i] = chkpt_trampoline[i];
+	}
 
-	uint64_t gic_shutdown_pa = 0xfffffff0074746d8ULL + slide;
-	*(volatile uint32_t *)gic_shutdown_pa = 0xd65f03c0; /* ret */
+	/* Hook _LowExceptionVectorBase at 0xfffffff00745f79c:
+	 * Right after ESR, ELR, FAR, LR, SP are saved, branch directly to test_exception
+	 * 0x14004d2c = b 0xfffffff007472c4c (test_exception)
+	 */
+	uint64_t exc_hook_pa = 0xfffffff00745f79cULL + slide;
+	*(volatile uint32_t *)exc_hook_pa = 0x14004d2c;
 
-	uint64_t pe_parse_pa = 0xfffffff007472a6cULL + slide;
-	*(volatile uint32_t *)pe_parse_pa = 0x52800000; /* mov w0, #0 (bypasses faulting call) */
+	/* Keep VBAR_EL1 as _LowExceptionVectorBase so all early exceptions are caught */
+	uint64_t vbar_patch_pa = 0xfffffff0074613d0ULL + slide;
+	*(volatile uint32_t *)vbar_patch_pa = 0xd503201f; /* nop */
 
-	/* Checkpoint 10: Natural ret into _arm_init, which runs KC setup and executes loader_checkpoint(10) */
 	/* common_start at 0xfffffff0074614a8..4b0 executes naturally:
 	 * add x0, x20, x22 (0x8b160280)
 	 * sub x0, x0, x23  (0xcb170000)

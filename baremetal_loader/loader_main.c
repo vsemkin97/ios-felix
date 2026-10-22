@@ -259,21 +259,41 @@ on_xnu_exception(uint64_t log_pa, uint64_t log_len, uint64_t code,
 		else if (esr == 5) con_str("STAGE", "05: MMU enabled (SCTLR_EL1)");
 		else if (esr == 6) con_str("STAGE", "06: common_start ret reached!");
 		else if (esr == 7) con_str("STAGE", "07: arm_init() C entry reached!");
-		else if (esr == 10) con_str("STAGE", "10: arm_init() C entry reached!");
+		else if (esr == 10) con_str("STAGE", "10: arm_init() entry (bootArgs copied)");
+		else if (esr == 11) con_str("STAGE", "11: PE_init_platform complete");
+		else if (esr == 30) con_str("STAGE", "30: timer configured");
+		else if (esr == 31) con_str("STAGE", "31: wfe_timeout configured");
+		else if (esr == 32) con_str("STAGE", "32: wfe_timeout init");
+		else if (esr == 33) con_str("STAGE", "33: misc apple regs configured");
+		else if (esr == 34) con_str("STAGE", "34: chosen node parsed");
+		else if (esr == 35) con_str("STAGE", "35: gT0Sz configured");
+		else if (esr == 12) con_str("STAGE", "12: cpu topology parsed");
+		else if (esr == 40) con_str("STAGE", "40: boot cpu number verified");
+		else if (esr == 41) con_str("STAGE", "41: cpu stacks configured");
+		else if (esr == 42) con_str("STAGE", "42: thread bootstrap complete");
+		else if (esr == 43) con_str("STAGE", "43: current thread established");
+		else if (esr == 17) con_str("STAGE", "17: arm_vm_init complete");
+		else if (esr == 18) con_str("STAGE", "18: serial init complete");
+		else if (esr == 19) con_str("STAGE", "19: startup init upto 4 complete");
+		else if (esr == 20) con_str("STAGE", "20: screen console created!");
 		else con_str("STAGE", "Checkpoint reached");
 		con_hex("SP", sp);
 		con_hex("LR", lr);
 		con_hex("PAR", far);
 	} else {
-		/* True exception: Red background */
+		/* True exception / panic: Red background */
 		con_clear(RED);
-		con_str("PANIC", "XNU Early Exception Intercepted!");
+		con_str("PANIC", "XNU Exception / Panic Intercepted!");
 		con_hex2("INFO", "code=", (uint32_t)code, "log_len=", (uint32_t)log_len);
 		con_hex("ESR", esr);
 		con_hex("ELR", elr);
 		con_hex("FAR", far);
 		con_hex("LR", lr);
 		con_hex("SP", sp);
+		if (esr >= KERNEL_VIRT_BASE && esr < KERNEL_VIRT_BASE + 0x2000000ULL) {
+			const char *msg = (const char *)(esr - KERNEL_VIRT_BASE + 0x80000000ULL);
+			con_str("MSG", msg);
+		}
 	}
 	decon_flush();
 
@@ -529,6 +549,7 @@ felix_baremetal_main(uint64_t fdt_addr)
 	decon_flush();
 
 	/* 7. Patch "XNULDRST" early exception slot */
+	uint64_t target_chkpt = 10; /* Checkpoint 10: First milestone of C execution in _arm_init */
 	uint8_t *p = (uint8_t *)kern_lo;
 	int patched = 0;
 	while (p + 16 <= (uint8_t *)kern_hi) {
@@ -536,7 +557,7 @@ felix_baremetal_main(uint64_t fdt_addr)
 		    p[4] == 'D' && p[5] == 'R' && p[6] == 'S' && p[7] == 'T') {
 			uint64_t *slot = (uint64_t *)p;
 			slot[1] = (uint64_t)&loader_return_stub;
-			slot[2] = 0; /* Checkpoint 0: NO CHECKPOINTS - boot kernel directly! */
+			slot[2] = target_chkpt;
 			slot[3] = slide;
 			patched = 1;
 			break;
@@ -579,7 +600,73 @@ felix_baremetal_main(uint64_t fdt_addr)
 	 */
 	*(volatile uint32_t *)(0xfffffff007472a6cULL + slide) = 0x52800000; /* mov w0, #0 */
 
-	/* 12. Pre-initialize PE_state.bootArgs pointer and loader_l1/l2 tables */
+	/* 12. Fix GIC quiesce and shutdown: do not dereference NULL TPIDR_EL1 */
+	*(volatile uint32_t *)(0xfffffff00747464cULL + slide) = 0xd65f03c0; /* ret for _gic_v3_irq_quiesce */
+	*(volatile uint32_t *)(0xfffffff0074746d8ULL + slide) = 0xd65f03c0; /* ret for _gic_v3_irq_cpu_shutdown */
+
+	/* 13. Fix _cpu_number at 0xfffffff007451d40: return 0 if TPIDR_EL1 is NULL */
+	volatile uint32_t *cpu_num = (volatile uint32_t *)(0xfffffff007451d40ULL + slide);
+	cpu_num[0] = 0xd538d080; /* mrs   x0, TPIDR_EL1 */
+	cpu_num[1] = 0xb40000a0; /* cbz   x0, +20 (0x18) */
+	cpu_num[2] = 0xf940e408; /* ldr   x8, [x0, #0x1c8] */
+	cpu_num[3] = 0xb4000068; /* cbz   x8, +12 (0x18) */
+	cpu_num[4] = 0x79c00100; /* ldrsh w0, [x8] */
+	cpu_num[5] = 0xd65f03c0; /* ret */
+	cpu_num[6] = 0x52800000; /* mov   w0, #0 */
+	cpu_num[7] = 0xd65f03c0; /* ret */
+
+	/* 14. Fix _current_percpu_base at 0xfffffff00745191c: return 0 if TPIDR_EL1 is NULL */
+	volatile uint32_t *percpu = (volatile uint32_t *)(0xfffffff00745191cULL + slide);
+	percpu[0] = 0xd538d080; /* mrs x0, TPIDR_EL1 */
+	percpu[1] = 0xb4000060; /* cbz x0, +12 (0x10) */
+	percpu[2] = 0xf940e000; /* ldr x0, [x0, #0x1c0] */
+	percpu[3] = 0xd65f03c0; /* ret */
+	percpu[4] = 0xd2800000; /* mov x0, #0 */
+	percpu[5] = 0xd65f03c0; /* ret */
+
+	/* 15. Setup dynamic branch instructions to loader_return_stub (0x800018a0) */
+	uint64_t stub_addr = (uint64_t)&loader_return_stub;
+	uint32_t lo16 = (uint32_t)(stub_addr & 0xffff);
+	uint32_t mid16 = (uint32_t)((stub_addr >> 16) & 0xffff);
+	uint32_t mov_lo = 0xd2800009u | (lo16 << 5);             /* mov  x9, #lo16 */
+	uint32_t mov_mid = 0xf2800009u | (mid16 << 5) | (1u << 21); /* movk x9, #mid16, lsl #16 */
+	uint32_t br_x9 = 0xd61f0120u;                             /* br   x9 */
+
+	/* 16. Hook _panic at 0xfffffff007acce1c to report to loader_return_stub */
+	volatile uint32_t *p_panic = (volatile uint32_t *)(0xfffffff007acce1cULL + slide);
+	p_panic[0] = 0xaa0003e3; /* mov  x3, x0 (format string VA) */
+	p_panic[1] = 0xaa1e03e4; /* mov  x4, x30 (caller PC) */
+	p_panic[2] = 0xd2800022; /* mov  x2, #1 (reason = panic) */
+	p_panic[3] = 0xaa1e03e6; /* mov  x6, x30 */
+	p_panic[4] = 0x910003e7; /* mov  x7, sp */
+	p_panic[5] = 0xd2800000; /* mov  x0, #0 */
+	p_panic[6] = 0xd2800001; /* mov  x1, #0 */
+	p_panic[7] = mov_lo;
+	p_panic[8] = mov_mid;
+	p_panic[9] = br_x9;
+
+	/* 17. Hook _ExceptionVectorsBase (slots 0, 3, 4, 7) to catch any early fault */
+	uint32_t exc_hook[11] = {
+		0xd5385203, /* mrs  x3, ESR_EL1 */
+		0xd5384024, /* mrs  x4, ELR_EL1 */
+		0xd5386005, /* mrs  x5, FAR_EL1 */
+		0xaa1e03e6, /* mov  x6, lr */
+		0x910003e7, /* mov  x7, sp */
+		0xd2800022, /* mov  x2, #1 */
+		0xd2800000, /* mov  x0, #0 */
+		0xd2800001, /* mov  x1, #0 */
+		mov_lo,
+		mov_mid,
+		br_x9
+	};
+	volatile uint8_t *vbase = (volatile uint8_t *)(0xfffffff00745a000ULL + slide);
+	const uint32_t slots[] = { 0x000, 0x180, 0x200, 0x380 };
+	for (int s = 0; s < 4; s++) {
+		volatile uint32_t *target = (volatile uint32_t *)(vbase + slots[s]);
+		for (int i = 0; i < 11; i++) target[i] = exc_hook[i];
+	}
+
+	/* 18. Pre-initialize PE_state.bootArgs pointer and loader_l1/l2 tables */
 	uint64_t ba_va = KERNEL_VIRT_BASE + (ba_pa - phys_base);
 	*(volatile uint64_t *)(0xfffffff007252900ULL + slide) = ba_va;
 
@@ -589,7 +676,7 @@ felix_baremetal_main(uint64_t fdt_addr)
 	l1[2] = loader_l2_pa | 0x3;
 	l2[0] = 0x80000000ULL | 0x601;
 
-	con_hex2("STUB", "patched=", patched, "chkpt=", 0);
+	con_hex2("STUB", "patched=", patched, "chkpt=", (uint32_t)target_chkpt);
 	con_hex("ENTRY", entry_pa);
 	con_str("READY", "Jumping to XNU kernel in 2s...");
 

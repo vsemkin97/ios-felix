@@ -26,6 +26,9 @@ void clean_dcache(uint64_t start, uint64_t end) __attribute__((visibility("hidde
 void jump_to_kernel(uint64_t entry_pa, uint64_t boot_args_pa) __attribute__((visibility("hidden")));
 void loader_return_stub(void) __attribute__((visibility("hidden")));
 
+extern const uint8_t _binary_test_launchd_bin_start[];
+extern const uint8_t _binary_test_launchd_bin_end[];
+
 static size_t
 str_len(const char *s)
 {
@@ -438,10 +441,18 @@ felix_baremetal_main(uint64_t fdt_addr)
 			seg_copied++;
 		}
 	}
-	con_hex2("SEGS", "copied=", seg_copied, "top=", (uint32_t)kern_hi);
+	/* 4. RAMDisk & Device Tree placement */
+	uint64_t ramdisk_pa = (kern_hi + 0x3ffffULL) & ~0x3ffffULL;
+	uint64_t ramdisk_size = 0x100000ULL; /* 1 MB */
 
-	/* 4. Device Tree placement */
-	uint64_t dt_pa = (kern_hi + 0x3fffULL) & ~0x3fffULL;
+	/* Copy launchd binary into the RAMDisk so mockfs mounts it as /sbin/launchd */
+	uint64_t launchd_sz = (uint64_t)(_binary_test_launchd_bin_end - _binary_test_launchd_bin_start);
+	volatile uint8_t *rd_ptr = (volatile uint8_t *)ramdisk_pa;
+	for (uint64_t i = 0; i < ramdisk_size; i++) rd_ptr[i] = 0;
+	for (uint64_t i = 0; i < launchd_sz && i < ramdisk_size; i++) rd_ptr[i] = _binary_test_launchd_bin_start[i];
+	con_hex2("RAMDISK", "pa=", (uint32_t)ramdisk_pa, "launchd_sz=", (uint32_t)launchd_sz);
+
+	uint64_t dt_pa = (ramdisk_pa + ramdisk_size + 0x3fffULL) & ~0x3fffULL;
 
 	/* 5. Build Apple Device Tree */
 	struct dt_writer w = { .base = (uint8_t *)dt_pa, .cur = (uint8_t *)dt_pa, .depth = 0 };
@@ -502,6 +513,8 @@ felix_baremetal_main(uint64_t fdt_addr)
 	dt_prop(&w, "nvram-proxy-data", nvram_image, sizeof(nvram_image));
 
 	dt_begin(&w, "memory-map");
+	uint64_t ramdisk_range[2] = { ramdisk_pa, ramdisk_size };
+	dt_prop(&w, "RAMDisk", ramdisk_range, sizeof(ramdisk_range));
 	dt_end(&w);
 	dt_end(&w); /* chosen */
 
@@ -606,7 +619,7 @@ felix_baremetal_main(uint64_t fdt_addr)
 
 	const char *cmd = qemu ?
 		"-v debug=0x8 serial=3 cpus=1" :
-		"-v debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress wdt=-1 wdt_test=no_user_checkin sweetusb=0 rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 launchd_unsecure_cache=1";
+		"-v debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress wdt=-1 wdt_test=no_user_checkin sweetusb=0 rd=md0 unentitled_ios_sim_launch=1 ignition_level=1 launchd_unsecure_cache=1";
 	memcpy(ba->commandLine, cmd, str_len(cmd) + 1);
 	con_str("BOOTARGS", ba->commandLine);
 	decon_flush();

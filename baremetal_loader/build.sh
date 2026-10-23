@@ -9,9 +9,10 @@ NM="/opt/homebrew/opt/llvm/bin/llvm-nm"
 READELF="/opt/homebrew/opt/llvm/bin/llvm-readelf"
 KERNEL="../prebuilt/mach.development.bcm2837"
 
-echo "=== [1/6] Embedding XNU Kernel Mach-O ==="
+echo "=== [1/6] Embedding XNU Kernel Mach-O & Launchd ==="
 cp "$KERNEL" kernel.macho
 $OBJCOPY -I binary -O elf64-littleaarch64 -B aarch64 kernel.macho kernel_blob.o
+$OBJCOPY -I binary -O elf64-littleaarch64 -B aarch64 test_launchd.bin launchd_blob.o
 
 echo "=== [2/6] Compiling Assembly Sources ==="
 $CLANG -c entry.S -o entry.o
@@ -28,7 +29,7 @@ got=$($READELF -r console.o loader_main.o | grep -c GOT || true)
 echo "Verified: strictly 0 ABS64 and 0 GOT relocations!"
 
 echo "=== [4/6] Linking baremetal_loader.elf ==="
-$LLD -T linker.ld --build-id=none -N entry.o console.o loader_main.o kernel_blob.o -o baremetal_loader.elf
+$LLD -T linker.ld --build-id=none -N entry.o console.o loader_main.o kernel_blob.o launchd_blob.o -o baremetal_loader.elf
 $OBJCOPY -O binary baremetal_loader.elf Image
 size=$($NM baremetal_loader.elf | awk '$3=="_end"{print "0x"$1}')
 truncate -s $(printf "%d" "$size") Image

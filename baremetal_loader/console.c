@@ -313,3 +313,10 @@ void con_hex2(const char *label, const char *a, uint32_t va, const char *b, uint
 	row++;
 	decon_flush();
 }
+
+uint64_t counter_freq(void)
+{
+	uint64_t frq;
+	__asm__ volatile("mrs %0, cntfrq_el0" : "=r"(frq));
+	return frq;
+}

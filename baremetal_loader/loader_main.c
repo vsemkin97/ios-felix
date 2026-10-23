@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include "console.h"
 #include "identity_felix.h"
+#include "ufsinit.h"
 
 #define KERNEL_VIRT_BASE    0xfffffff007004000ULL
 #define PAGE_SIZE_MAX       0x4000ULL
@@ -28,6 +29,65 @@ void loader_return_stub(void) __attribute__((visibility("hidden")));
 
 extern const uint8_t _binary_test_launchd_bin_start[];
 extern const uint8_t _binary_test_launchd_bin_end[];
+
+extern void secondary_entry(void);
+
+static volatile uint64_t g_rdw_pa = 0;
+static volatile uint64_t g_ufs_buf_pa = 0;
+static volatile uint64_t g_ufs_dma_desc_pa = 0;
+static volatile uint32_t g_ufs_hardware_ready = 0;
+static volatile uint64_t g_userdata_start_lba = 0;
+static volatile uint32_t g_core1_alive = 0;
+
+void secondary_core_main(void)
+{
+	g_core1_alive = 0xCAFEBABE;
+	volatile uint8_t *rdw = (volatile uint8_t *)g_rdw_pa;
+	uint32_t last_answered = 0;
+
+	for (;;) {
+		uint32_t req = *(volatile uint32_t *)(rdw + 0x80);
+		if (req != 0 && req != last_answered) {
+			uint64_t lba  = *(volatile uint64_t *)(rdw + 0x88);
+			uint64_t cnt  = *(volatile uint64_t *)(rdw + 0x90);
+			uint32_t op   = *(volatile uint32_t *)(rdw + 0x98);
+
+			int64_t status = 0;
+			if (g_ufs_hardware_ready && op == 0 && g_ufs_buf_pa != 0) {
+				uint64_t phys_lba = g_userdata_start_lba + lba;
+				int scsi_rc = ufs_scsi_read(g_ufs_dma_desc_pa, 0, phys_lba, (uint32_t)cnt, (void *)g_ufs_buf_pa);
+				if (scsi_rc != 0) {
+					status = (int64_t)scsi_rc;
+				}
+			}
+
+			/* Success: acknowledge request */
+			*(volatile int64_t *)(rdw + 0x108) = status;
+			*(volatile uint64_t *)(rdw + 0x110) += 1;
+			*(volatile uint64_t *)(rdw + 0x120) += cnt * 4096;
+			__asm__ volatile("dmb sy" ::: "memory");
+			*(volatile uint32_t *)(rdw + 0x100) = req;
+			last_answered = req;
+		}
+		__asm__ volatile("yield");
+	}
+}
+
+static int psci_cpu_on(uint64_t mpidr, uint64_t entry_pa, uint64_t context_id)
+{
+	register uint64_t x0 __asm__("x0") = 0xC4000003; /* PSCI_CPU_ON_64 */
+	register uint64_t x1 __asm__("x1") = mpidr;
+	register uint64_t x2 __asm__("x2") = entry_pa;
+	register uint64_t x3 __asm__("x3") = context_id;
+	__asm__ volatile(
+		"smc #0\n"
+		: "+r"(x0)
+		: "r"(x1), "r"(x2), "r"(x3)
+		: "memory"
+	);
+	return (int)x0;
+}
+
 
 static size_t
 str_len(const char *s)
@@ -441,6 +501,7 @@ felix_baremetal_main(uint64_t fdt_addr)
 			seg_copied++;
 		}
 	}
+	con_hex2("SEGMENTS", "copied=", seg_copied, "cmds=", mh->ncmds);
 	/* 4. RDWBLOCK, UFS DMA Buffer, RAMDisk & Device Tree placement */
 	uint64_t rdw_pa = (kern_hi + 0x3ffffULL) & ~0x3ffffULL;
 	uint64_t rdw_size = 0x4000ULL; /* 16 KB page */
@@ -464,13 +525,19 @@ felix_baremetal_main(uint64_t fdt_addr)
 	volatile uint8_t *part0 = rdw + 0x180;
 	const char *pname = "userdata";
 	for (int i = 0; pname[i]; i++) part0[i] = pname[i];
-	*(volatile uint64_t *)(part0 + 0x20) = 0;                    /* start_lba */
-	*(volatile uint64_t *)(part0 + 0x28) = 0x2000000ULL;         /* 33M blocks (~16GB) */
-	*(volatile uint32_t *)(part0 + 0x30) = 0;                    /* LUN 0 */
+	*(volatile uint32_t *)(part0 + 0x24) = 4096;                 /* block_size = 4096 bytes */
+	*(volatile uint64_t *)(part0 + 0x28) = 4194304ULL;           /* 4,194,304 blocks (16 GB) */
+	*(volatile uint64_t *)(part0 + 0x30) = 0;                    /* start_lba = 0 */
+	*(volatile uint16_t *)(part0 + 0x38) = 0;                    /* unit = 0 */
+	*(volatile uint8_t *)(part0 + 0x3a) = 0;                     /* lun = 0 */
+	*(volatile uint8_t *)(part0 + 0x3b) = 0;                     /* flags = 0 (creates block node) */
 
 	con_hex2("RDWBLOCK", "pa=", (uint32_t)rdw_pa, "buf_pa=", (uint32_t)ufs_buf_pa);
 
-	uint64_t ramdisk_pa = ufs_buf_pa + ufs_buf_size;
+	uint64_t ufs_dma_desc_pa = ufs_buf_pa + ufs_buf_size;
+	uint64_t ufs_dma_desc_size = 0x4000ULL; /* 16 KB for UTRL/UTMRL/UCD */
+
+	uint64_t ramdisk_pa = ufs_dma_desc_pa + ufs_dma_desc_size;
 	uint64_t ramdisk_size = 0x100000ULL; /* 1 MB */
 
 	/* Copy launchd binary into the RAMDisk so mockfs mounts it as /sbin/launchd */
@@ -684,6 +751,77 @@ felix_baremetal_main(uint64_t fdt_addr)
 
 	con_hex2("STUB", "patched=", patched, "chkpt=", (uint32_t)target_chkpt);
 	con_hex("ENTRY", entry_pa);
+
+	g_rdw_pa = rdw_pa;
+	g_ufs_buf_pa = ufs_buf_pa;
+	g_ufs_dma_desc_pa = ufs_dma_desc_pa;
+
+	/* Initialize UFS Host Controller & PHY */
+	con_str("UFS", "Starting hardware cold-init...");
+	int ufs_rc = ufs_cold_init();
+	con_hex2("UFS", "cold_init rc=", ufs_rc, "hcs=", *(volatile uint32_t *)0x14700030UL);
+
+	if (ufs_rc == 0) {
+		ufs_init_host_dma(ufs_dma_desc_pa);
+		g_ufs_hardware_ready = 1;
+		con_str("UFS", "Host DMA and link operational!");
+
+		/* Clear Unit Attention with TUR */
+		for (int i = 0; i < 3; i++) {
+			int tur_rc = ufs_scsi_tur(ufs_dma_desc_pa, 0);
+			con_hex2("UFS TUR", "try=", i, "rc=", tur_rc);
+			if (tur_rc == 0) break;
+			delay_ms(10);
+		}
+
+		/* Read GPT header from LBA 1 to find userdata start LBA */
+		static uint8_t gpt_buf[4096];
+		int gpt_rc = ufs_scsi_read(ufs_dma_desc_pa, 0, 1, 1, gpt_buf);
+		con_hex2("UFS GPT", "rc=", gpt_rc, "magic=", *(uint32_t *)gpt_buf);
+		if (gpt_rc == 0 && *(uint32_t *)gpt_buf == 0x20494645) { /* 'EFI ' */
+			uint64_t part_lba = *(uint64_t *)(gpt_buf + 0x48);
+			uint32_t num_parts = *(uint32_t *)(gpt_buf + 0x50);
+			uint32_t part_size = *(uint32_t *)(gpt_buf + 0x54);
+			con_hex2("GPT PARTS", "start_lba=", (uint32_t)part_lba, "count=", num_parts);
+
+			for (uint32_t p = 0; p < num_parts && p < 128; p++) {
+				uint64_t ent_block = part_lba + (p * part_size) / 4096;
+				uint32_t ent_off = (p * part_size) % 4096;
+				static uint8_t ent_buf[4096];
+				if (ufs_scsi_read(ufs_dma_desc_pa, 0, ent_block, 1, ent_buf) == 0) {
+					uint8_t *ent = ent_buf + ent_off;
+					uint16_t *pname16 = (uint16_t *)(ent + 0x38);
+					if (pname16[0] == 'u' && pname16[1] == 's' && pname16[2] == 'e' &&
+					    pname16[3] == 'r' && pname16[4] == 'd' && pname16[5] == 'a' &&
+					    pname16[6] == 't' && pname16[7] == 'a') {
+						g_userdata_start_lba = *(uint64_t *)(ent + 0x20);
+						uint64_t end_lba = *(uint64_t *)(ent + 0x28);
+						con_hex2("USERDATA", "start_lba=", (uint32_t)g_userdata_start_lba, "end_lba=", (uint32_t)end_lba);
+						/* Update part0 block count with actual partition size */
+						if (end_lba > g_userdata_start_lba) {
+							*(volatile uint64_t *)(part0 + 0x28) = (end_lba - g_userdata_start_lba + 1);
+						}
+						break;
+					}
+				}
+			}
+		}
+	}
+
+	/* Start Core 1 for UFS mailbox servicing */
+	uint64_t sec_entry_pa = 0;
+	__asm__ volatile(
+		"adrp %0, secondary_entry\n"
+		"add %0, %0, :lo12:secondary_entry\n"
+		: "=r"(sec_entry_pa)
+	);
+
+	int psci_rc = psci_cpu_on(0x81000100ULL, sec_entry_pa, 0);
+	if (psci_rc != 0) {
+		psci_rc = psci_cpu_on(0x100ULL, sec_entry_pa, 0);
+	}
+	con_hex2("PSCI CORE1", "rc=", psci_rc, "alive=", g_core1_alive);
+
 	con_str("READY", "Jumping to XNU kernel in 2s...");
 
 	/* Clean caches across the entire loaded region */

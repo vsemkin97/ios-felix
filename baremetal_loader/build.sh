@@ -9,6 +9,9 @@ NM="/opt/homebrew/opt/llvm/bin/llvm-nm"
 READELF="/opt/homebrew/opt/llvm/bin/llvm-readelf"
 KERNEL="../prebuilt/mach.development.bcm2837"
 
+echo "=== [0/6] Compiling Userspace Test Launchd Binary ==="
+clang -target arm64-apple-macos -nostdlib -static -fno-stack-protector -e __start test_init.c -o test_launchd.bin
+
 echo "=== [1/6] Embedding XNU Kernel Mach-O & Launchd ==="
 cp "$KERNEL" kernel.macho
 $OBJCOPY -I binary -O elf64-littleaarch64 -B aarch64 kernel.macho kernel_blob.o
@@ -20,16 +23,17 @@ $CLANG -c entry.S -o entry.o
 echo "=== [3/6] Compiling C Sources (strictly 0 ABS64 & 0 GOT relocations) ==="
 CFLAGS="-O2 -ffreestanding -nostdlib -fpie -fvisibility=hidden -mgeneral-regs-only -mstrict-align -fno-stack-protector -Wall -Wextra -Wno-unused-parameter -I."
 $CLANG $CFLAGS -c console.c -o console.o
+$CLANG $CFLAGS -c ufsinit.c -o ufsinit.o
 $CLANG $CFLAGS -c loader_main.c -o loader_main.o
 
-abs=$($READELF -r console.o loader_main.o | grep -c ABS64 || true)
-got=$($READELF -r console.o loader_main.o | grep -c GOT || true)
+abs=$($READELF -r console.o ufsinit.o loader_main.o | grep -c ABS64 || true)
+got=$($READELF -r console.o ufsinit.o loader_main.o | grep -c GOT || true)
 [ "$abs" = 0 ] || { echo "ERROR: $abs absolute relocations in C objects!" >&2; exit 1; }
 [ "$got" = 0 ] || { echo "ERROR: $got GOT relocations in C objects!" >&2; exit 1; }
 echo "Verified: strictly 0 ABS64 and 0 GOT relocations!"
 
 echo "=== [4/6] Linking baremetal_loader.elf ==="
-$LLD -T linker.ld --build-id=none -N entry.o console.o loader_main.o kernel_blob.o launchd_blob.o -o baremetal_loader.elf
+$LLD -T linker.ld --build-id=none -N entry.o console.o ufsinit.o loader_main.o kernel_blob.o launchd_blob.o -o baremetal_loader.elf
 $OBJCOPY -O binary baremetal_loader.elf Image
 size=$($NM baremetal_loader.elf | awk '$3=="_end"{print "0x"$1}')
 truncate -s $(printf "%d" "$size") Image

@@ -117,6 +117,48 @@ hang:
 	b	hang
 
 /*
+ * Secondary CPU entry point for PSCI CPU_ON.
+ * Core 1 starts here, sets up stack, and enters the mailbox responder loop.
+ */
+	.balign	0x800
+	.globl secondary_entry
+secondary_entry:
+	msr	daifset, #0xf		/* Disable interrupts */
+
+	mrs	x21, CurrentEL
+	lsr	x21, x21, #2
+	cmp	x21, #2
+	b.ne	.L_sec_el1
+
+	/* At EL2: drop to EL1 */
+	mov	x2, #(1 << 31)
+	msr	hcr_el2, x2
+	mov	x2, #3
+	msr	cnthctl_el2, x2
+	msr	cptr_el2, xzr
+	msr	hstr_el2, xzr
+	adrp	x2, .L_sec_el1
+	add	x2, x2, :lo12:.L_sec_el1
+	msr	elr_el2, x2
+	mov	x2, #0x3c5		/* EL1h */
+	msr	spsr_el2, x2
+	eret
+
+.L_sec_el1:
+	msr	spsel, #1
+	adrp	x1, _sec_stacks
+	add	x1, x1, :lo12:_sec_stacks
+	add	x1, x1, #0x2000		/* 8KB stack for Core 1 */
+	mov	sp, x1
+
+	bl	secondary_core_main
+
+.L_sec_hang:
+	wfe
+	b	.L_sec_hang
+
+
+/*
  * Exception vectors. Each slot stashes x29/x30, loads its slot number
  * and jumps to the common path, which saves x0-x28 and calls exc_handler(slot, regs).
  */

@@ -492,7 +492,7 @@ felix_baremetal_main(uint64_t fdt_addr)
 	uint64_t blk_align = (virt_base == 0xfffffe0007004000ULL) ? 0x2000000ULL : 0x200000ULL;
 	uint64_t phys_base = 0xA0000000ULL + (virt_base & (blk_align - 1));
 	g_phys_base = phys_base;
-	uint64_t win_size  = 0x50000000ULL; /* 1.25 GB */
+	uint64_t win_size  = 0x22000000ULL; /* 544 MB: strictly below 0xC3000000 carveouts */
 	uint64_t slide     = phys_base - virt_base;
 
 	uint64_t entry_pa = entry_va + slide;

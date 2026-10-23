@@ -373,20 +373,29 @@ struct ucd {
 
 void ufs_init_host_dma(uint64_t dma_pa)
 {
-	/* Program UTRLBA */
+	/* Stop transfer request list before reprogramming base */
+	wr(HCI + 0x60, 0);
+	poll(HCI + 0x60, 1, 0, 100000);
+
+	/* Program UTRLBA and UTRLBAU */
 	wr(HCI + 0x50, (uint32_t)dma_pa);
 	wr(HCI + 0x54, (uint32_t)(dma_pa >> 32));
+	__asm__ volatile("dsb sy" ::: "memory");
+
+	/* Enable all slots for SCSI */
+	wr(VS + 0x40, 0xFFFFFFFFu);
 
 	/* Enable transfer request list running */
 	wr(HCI + 0x60, 1);
 
-	/* Poll HCS.UTRLRDY */
+	/* Poll UTRLRSR and HCS.UTRLRDY */
+	poll(HCI + 0x60, 1, 1, 100000);
 	poll(HCI + 0x30, 0x2, 0x2, 100000);
 }
 
-int ufs_scsi_tur(uint64_t dma_pa, uint8_t lun)
+int64_t ufs_scsi_tur(uint64_t dma_pa, uint8_t lun)
 {
-	const unsigned slot = 1;
+	const unsigned slot = 0;
 	const uint32_t slot_bit = 1u << slot;
 
 	volatile struct utrd *utrd = (volatile struct utrd *)dma_pa + slot;
@@ -401,7 +410,7 @@ int ufs_scsi_tur(uint64_t dma_pa, uint8_t lun)
 	ucd->cmd[0] = 0x01; /* COMMAND UPIU */
 	ucd->cmd[1] = 0x00; /* No data transfer */
 	ucd->cmd[2] = lun;
-	ucd->cmd[3] = slot;
+	ucd->cmd[3] = slot + 1;
 	ucd->cmd[16] = 0x00; /* TEST UNIT READY */
 
 	utrd->dw0 = (1u << 28) | (0u << 25) | (1u << 24); /* CT=1 (UFS), DD=0 (none), I=1 */
@@ -420,7 +429,7 @@ int ufs_scsi_tur(uint64_t dma_pa, uint8_t lun)
 	while (rd(HCI + 0x58) & slot_bit) {
 		if (now() > end) {
 			wr(HCI + 0x5c, slot_bit); /* UTRLCLR */
-			return -1;
+			return (int64_t)(0xDEAD000000000000ULL | ((uint64_t)(rd(HCI + 0x58)) << 32) | (uint64_t)(rd(HCI + 0x30)));
 		}
 	}
 
@@ -431,12 +440,14 @@ int ufs_scsi_tur(uint64_t dma_pa, uint8_t lun)
 	if (ocs == 0 && ucd->resp[0] == 0x21 && ucd->resp[6] == 0 && ucd->resp[7] == 0) {
 		return 0;
 	}
-	return -2;
+	return (int64_t)(0xE000000000000000ULL | ((uint64_t)ocs << 24) |
+	                 ((uint64_t)ucd->resp[0] << 16) | ((uint64_t)ucd->resp[6] << 8) |
+	                 (uint64_t)ucd->resp[7]);
 }
 
-static int ufs_scsi_read_once(uint64_t dma_pa, uint8_t lun, uint64_t lba, uint32_t count_blocks, void *bounce_ptr)
+static int64_t ufs_scsi_read_once(uint64_t dma_pa, uint8_t lun, uint64_t lba, uint32_t count_blocks, void *bounce_ptr)
 {
-	const unsigned slot = 1;
+	const unsigned slot = 0;
 	const uint32_t slot_bit = 1u << slot;
 
 	volatile struct utrd *utrd = (volatile struct utrd *)dma_pa + slot;
@@ -453,7 +464,7 @@ static int ufs_scsi_read_once(uint64_t dma_pa, uint8_t lun, uint64_t lba, uint32
 	ucd->cmd[0] = 0x01; /* COMMAND UPIU */
 	ucd->cmd[1] = 0x40; /* Data IN (READ) */
 	ucd->cmd[2] = lun;
-	ucd->cmd[3] = slot;
+	ucd->cmd[3] = slot + 1;
 	ucd->cmd[12] = (uint8_t)(len >> 24);
 	ucd->cmd[13] = (uint8_t)(len >> 16);
 	ucd->cmd[14] = (uint8_t)(len >> 8);
@@ -516,7 +527,7 @@ static int ufs_scsi_read_once(uint64_t dma_pa, uint8_t lun, uint64_t lba, uint32
 	while (rd(HCI + 0x58) & slot_bit) {
 		if (now() > end) {
 			wr(HCI + 0x5c, slot_bit); /* UTRLCLR */
-			return -1;
+			return (int64_t)(0xDEAD000000000000ULL | ((uint64_t)(rd(HCI + 0x58)) << 32) | (uint64_t)(rd(HCI + 0x30)));
 		}
 	}
 
@@ -528,20 +539,23 @@ static int ufs_scsi_read_once(uint64_t dma_pa, uint8_t lun, uint64_t lba, uint32
 		ocs = 0;
 
 	if (ocs != 0 || ucd->resp[0] != 0x21 || ucd->resp[6] != 0 || ucd->resp[7] != 0) {
-		return -2;
+		return (int64_t)(0xE000000000000000ULL | ((uint64_t)ocs << 24) |
+		                 ((uint64_t)ucd->resp[0] << 16) | ((uint64_t)ucd->resp[6] << 8) |
+		                 (uint64_t)ucd->resp[7]);
 	}
 	return 0;
 }
 
-int ufs_scsi_read(uint64_t dma_pa, uint8_t lun, uint64_t lba, uint32_t count_blocks, void *bounce_ptr)
+int64_t ufs_scsi_read(uint64_t dma_pa, uint8_t lun, uint64_t lba, uint32_t count_blocks, void *bounce_ptr)
 {
+	int64_t rc = 0;
 	for (int try = 0; try < 3; try++) {
-		int rc = ufs_scsi_read_once(dma_pa, lun, lba, count_blocks, bounce_ptr);
+		rc = ufs_scsi_read_once(dma_pa, lun, lba, count_blocks, bounce_ptr);
 		if (rc == 0)
 			return 0;
 		udelay(1000);
 	}
-	return -2;
+	return rc;
 }
 
 

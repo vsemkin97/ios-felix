@@ -53,11 +53,17 @@ void secondary_core_main(void)
 			uint32_t op   = *(volatile uint32_t *)(rdw + 0x98);
 
 			int64_t status = 0;
-			if (g_ufs_hardware_ready && op == 0 && g_ufs_buf_pa != 0) {
+			if (!g_ufs_hardware_ready) {
+				status = (int64_t)0xBAAD000100000000ULL;
+			} else if (op != 0) {
+				status = (int64_t)0xBAAD000200000000ULL;
+			} else if (g_ufs_buf_pa == 0) {
+				status = (int64_t)0xBAAD000300000000ULL;
+			} else {
 				uint64_t phys_lba = g_userdata_start_lba + lba;
-				int scsi_rc = ufs_scsi_read(g_ufs_dma_desc_pa, 0, phys_lba, (uint32_t)cnt, (void *)g_ufs_buf_pa);
+				int64_t scsi_rc = ufs_scsi_read(g_ufs_dma_desc_pa, 0, phys_lba, (uint32_t)cnt, (void *)g_ufs_buf_pa);
 				if (scsi_rc != 0) {
-					status = (int64_t)scsi_rc;
+					status = scsi_rc;
 				}
 			}
 
@@ -768,16 +774,16 @@ felix_baremetal_main(uint64_t fdt_addr)
 
 		/* Clear Unit Attention with TUR */
 		for (int i = 0; i < 3; i++) {
-			int tur_rc = ufs_scsi_tur(ufs_dma_desc_pa, 0);
-			con_hex2("UFS TUR", "try=", i, "rc=", tur_rc);
+			int64_t tur_rc = ufs_scsi_tur(ufs_dma_desc_pa, 0);
+			con_hex2("UFS TUR", "try=", i, "rc=", (uint32_t)tur_rc);
 			if (tur_rc == 0) break;
 			delay_ms(10);
 		}
 
 		/* Read GPT header from LBA 1 to find userdata start LBA */
 		static uint8_t gpt_buf[4096];
-		int gpt_rc = ufs_scsi_read(ufs_dma_desc_pa, 0, 1, 1, gpt_buf);
-		con_hex2("UFS GPT", "rc=", gpt_rc, "magic=", *(uint32_t *)gpt_buf);
+		int64_t gpt_rc = ufs_scsi_read(ufs_dma_desc_pa, 0, 1, 1, gpt_buf);
+		con_hex2("UFS GPT", "rc=", (uint32_t)gpt_rc, "magic=", *(uint32_t *)gpt_buf);
 		if (gpt_rc == 0 && *(uint32_t *)gpt_buf == 0x20494645) { /* 'EFI ' */
 			uint64_t part_lba = *(uint64_t *)(gpt_buf + 0x48);
 			uint32_t num_parts = *(uint32_t *)(gpt_buf + 0x50);
@@ -822,12 +828,12 @@ felix_baremetal_main(uint64_t fdt_addr)
 	}
 	con_hex2("PSCI CORE1", "rc=", psci_rc, "alive=", g_core1_alive);
 
-	con_str("READY", "Jumping to XNU kernel in 2s...");
+	con_str("READY", "Jumping to XNU kernel in 3s...");
 
 	/* Clean caches across the entire loaded region */
 	clean_dcache(kern_lo, top);
 
-	delay_ms(2000);
+	delay_ms(3000);
 
 	/* Re-arm DECON continuous HW trigger (0x3061) so XNU screen console updates continuously */
 	decon_rearm_continuous();

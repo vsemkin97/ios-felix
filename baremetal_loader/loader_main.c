@@ -766,7 +766,7 @@ felix_baremetal_main(uint64_t fdt_addr)
 		const char *qcmd = "-v debug=0x8 serial=3 cpus=1";
 		memcpy(ba->commandLine, qcmd, str_len(qcmd) + 1);
 	} else {
-		const char *cmd = "-v debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress wdt=-1 wdt_test=no_user_checkin sweetusb=0 sweetlog=0 rd=ufsroot0 ufsrw=0 rootrw=0 unentitled_ios_sim_launch=1 ignition_level=1 launchd_unsecure_cache=1";
+		const char *cmd = "-v debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress wdt=-1 wdt_test=no_user_checkin sweetusb=0 sweetlog=0 rd=ufsroot0 ufsrw=0 rootrw=0 unentitled_ios_sim_launch=1 ignition_level=1 ignition_force_dylib_root=1 launchd_unsecure_cache=1";
 		memcpy(ba->commandLine, cmd, str_len(cmd) + 1);
 	}
 	con_str("BOOTARGS", ba->commandLine);

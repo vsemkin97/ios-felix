@@ -597,7 +597,7 @@ felix_baremetal_main(uint64_t fdt_addr)
 	dt_prop_u32(&w, "#size-cells", 2);
 
 	const char *cmd = qemu ? "-v debug=0x8 serial=3 cpus=1" :
-		"-v debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress wdt=-1 wdt_test=no_user_checkin sweetusb=0 sweetlog=0 rd=ufsroot0 ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 launchd_unsecure_cache=1";
+		"-v debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress wdt=-1 wdt_test=no_user_checkin sweetusb=0 sweetlog=0 rd=ufsroot0 ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 launchd_unsecure_cache=1 sweetfb_native=1";
 
 	dt_begin(&w, "chosen");
 	dt_prop_str(&w, "boot-args", cmd);
@@ -744,6 +744,15 @@ felix_baremetal_main(uint64_t fdt_addr)
 		dt_prop_u32(&w, "boot-console", 1);
 		dt_end(&w);
 	}
+
+	/* Display Subsystem for AppleCLCD / IOMobileFramebuffer -> CADisplay */
+	dt_begin(&w, "disp0");
+	dt_prop_str(&w, "name", "sweet,display");
+	dt_prop_str(&w, "compatible", "sweet,display");
+	dt_prop_str(&w, "device_type", "display-subsystem");
+	dt_prop_u32(&w, "canvas-width", FB_W);
+	dt_prop_u32(&w, "canvas-height", FB_H);
+	dt_end(&w);
 
 	dt_end(&w); /* arm-io */
 	dt_end(&w); /* device-tree */

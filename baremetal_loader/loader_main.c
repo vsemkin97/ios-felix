@@ -621,6 +621,9 @@ felix_baremetal_main(uint64_t fdt_addr)
 
 	delay_ms(2000);
 
+	/* Re-arm DECON continuous HW trigger (0x3061) so XNU screen console updates continuously */
+	decon_rearm_continuous();
+
 	/* Jump to XNU! */
 	jump_to_kernel(entry_pa, ba_pa);
 }

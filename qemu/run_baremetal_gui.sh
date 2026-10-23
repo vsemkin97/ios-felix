@@ -13,4 +13,5 @@ qemu-system-aarch64 \
     -device ramfb \
     -display cocoa \
     -serial stdio \
+    -qmp unix:/tmp/qemu-qmp.sock,server,nowait \
     -no-reboot "$@"

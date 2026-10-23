@@ -156,23 +156,47 @@ void decon_flush(void)
 		__asm__ volatile("yield");
 	}
 
-	/* 6. Clear trigger bits in TRIGCON */
-	decon1[0x30 / 4] &= ~0x103;
-	decon0[0x30 / 4] &= ~0x103;
+	/* 6. Leave HW TE trigger continuously armed: 0x3061 (PixOS & pmOS standard) */
+	decon1[0x30 / 4] = 0x3061;
+	decon0[0x30 / 4] = 0x3061;
+	*(volatile uint32_t *)0x1C300030UL = 0x3061;
+	*(volatile uint32_t *)0x1C200030UL = 0x3061;
 
-	/* 7. Fallback: if HW TE did not clear UPDATE_REQ, fire SW trigger */
+	/* 7. Fallback: if HW TE did not clear UPDATE_REQ, keep 0x3061 */
 	if (decon1[0x50 / 4] != 0) {
-		decon1[0x30 / 4] = (decon1[0x30 / 4] & ~0x103) | 0x1;
-		decon0[0x30 / 4] = (decon0[0x30 / 4] & ~0x103) | 0x1;
-		end = get_cntvct() + (frq / 20);
-		while (get_cntvct() < end) {
-			if (decon1[0x50 / 4] == 0)
-				break;
-			__asm__ volatile("yield");
-		}
-		decon1[0x30 / 4] &= ~0x103;
-		decon0[0x30 / 4] &= ~0x103;
+		decon1[0x30 / 4] = 0x3061;
+		decon0[0x30 / 4] = 0x3061;
+		*(volatile uint32_t *)0x1C300030UL = 0x3061;
+		*(volatile uint32_t *)0x1C200030UL = 0x3061;
 	}
+
+	__asm__ volatile("dsb sy; isb" ::: "memory");
+}
+
+void decon_rearm_continuous(void)
+{
+	if (is_qemu()) return;
+
+	__asm__ volatile("dsb sy" ::: "memory");
+	for (uintptr_t p = 0xfc000000UL; p < 0xfc000000UL + 0x8a0000UL; p += 64) {
+		__asm__ volatile("dc civac, %0" :: "r"(p) : "memory");
+	}
+	for (uintptr_t p = 0xfac00000UL; p < 0xfac00000UL + 0xf80000UL; p += 64) {
+		__asm__ volatile("dc civac, %0" :: "r"(p) : "memory");
+	}
+	__asm__ volatile("dsb sy" ::: "memory");
+
+	/* Arm continuous hardware TE trigger 0x3061 across all DECON blocks */
+	*(volatile uint32_t *)0x1C241030UL = 0x3061;
+	*(volatile uint32_t *)0x1C240030UL = 0x3061;
+	*(volatile uint32_t *)0x1C300030UL = 0x3061;
+	*(volatile uint32_t *)0x1C200030UL = 0x3061;
+
+	/* Commit shadow update */
+	*(volatile uint32_t *)0x1C241050UL |= 0x8010003f;
+	*(volatile uint32_t *)0x1C240050UL |= 0x8010003f;
+	*(volatile uint32_t *)0x1C300050UL |= 0x8010003f;
+	*(volatile uint32_t *)0x1C200050UL |= 0x8010003f;
 
 	__asm__ volatile("dsb sy; isb" ::: "memory");
 }
@@ -253,6 +277,7 @@ void con_str(const char *label, const char *s)
 	if (c < LABEL_COLS) c = LABEL_COLS;
 	put_str(c + 1, s, WHITE);
 	row++;
+	decon_flush();
 }
 
 void con_hex(const char *label, uint64_t v)

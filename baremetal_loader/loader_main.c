@@ -629,6 +629,11 @@ felix_baremetal_main(uint64_t fdt_addr)
 	dt_prop_u32(&w, "nvram-current-bank", 0);
 	dt_prop(&w, "nvram-proxy-data", nvram_image, sizeof(nvram_image));
 
+	dt_begin(&w, "asmb");
+	dt_prop_u64(&w, "lp-sip0", 0x6fULL);
+	dt_prop_u32(&w, "lp-sip1", 1);
+	dt_end(&w);
+
 	dt_begin(&w, "memory-map");
 	uint64_t ramdisk_range[2] = { ramdisk_pa, ramdisk_size };
 	dt_prop(&w, "RAMDisk", ramdisk_range, sizeof(ramdisk_range));
@@ -648,7 +653,7 @@ felix_baremetal_main(uint64_t fdt_addr)
 	if (!qemu) {
 		dt_begin(&w, "sweet-ufs");
 		dt_prop_str(&w, "compatible", "google,gs101-ufs");
-		uint64_t ufs_reg[2] = { 0x14700000ULL, 0x200ULL };
+		uint64_t ufs_reg[2] = { 0x14700000ULL, 0x3000ULL };
 		dt_prop(&w, "reg", ufs_reg, sizeof(ufs_reg));
 		dt_end(&w);
 
@@ -670,21 +675,29 @@ felix_baremetal_main(uint64_t fdt_addr)
 
 	/* CPU cores */
 	dt_begin(&w, "cpus");
+	dt_prop_u32(&w, "#address-cells", 1);
+	dt_prop_u32(&w, "#size-cells", 0);
 	for (int i = 0; i < (qemu ? 1 : 8); i++) {
 		char name[5] = { 'c', 'p', 'u', (char)('0' + i), 0 };
 		dt_begin(&w, name);
 		dt_prop_str(&w, "device_type", "cpu");
-		dt_prop_str(&w, "state", i == 0 ? "running" : "waiting");
-		uint32_t reg_val = qemu ? (uint32_t)i : (uint32_t)(i << 8);
+		static const char cpu_compat[] = "qcom,kryo470\0ARM,v8\0";
+		dt_prop(&w, "compatible", cpu_compat, sizeof(cpu_compat));
+		dt_prop_str(&w, "state", i == 0 ? "running" : "stopped");
+		uint32_t reg_val = (uint32_t)(i << 8);
 		dt_prop_u32(&w, "reg", reg_val);
 		dt_prop_u32(&w, "cpu-id", (uint32_t)i);
-		dt_prop_u64(&w, "timebase-frequency", cntfrq);
-		dt_prop_u64(&w, "fixed-frequency", cntfrq);
-		dt_prop_u64(&w, "clock-frequency", 1800000000ULL);
-		dt_prop_u64(&w, "bus-frequency", 100000000ULL);
-		dt_prop_u64(&w, "memory-frequency", 100000000ULL);
-		dt_prop_u64(&w, "peripheral-frequency", 24000000ULL);
-		if (!qemu && i < 4) dt_prop_u32(&w, "small-core", 1);
+		dt_prop_u32(&w, "cluster-id", 0);
+		dt_prop_u32(&w, "cluster-type", 0);
+		dt_prop_u32(&w, "cluster-core-id", (uint32_t)i);
+		dt_prop_u32(&w, "l2-cache-id", (uint32_t)i);
+		dt_prop_u32(&w, "l3-cache-id", 0);
+		dt_prop_u32(&w, "timebase-frequency", (uint32_t)cntfrq);
+		dt_prop_u32(&w, "fixed-frequency", (uint32_t)cntfrq);
+		dt_prop_u32(&w, "clock-frequency", (uint32_t)(i >= 6 ? 2850000000U : (i >= 4 ? 2350000000U : 1800000000U)));
+		dt_prop_u32(&w, "bus-frequency", 100000000U);
+		dt_prop_u32(&w, "memory-frequency", 1866000000U);
+		dt_prop_u32(&w, "peripheral-frequency", (uint32_t)cntfrq);
 		dt_end(&w);
 	}
 	dt_end(&w); /* cpus */
@@ -696,10 +709,17 @@ felix_baremetal_main(uint64_t fdt_addr)
 	dt_prop_u32(&w, "#address-cells", 2);
 	dt_prop_u32(&w, "#size-cells", 2);
 
+	/* wdt */
+	dt_begin(&w, "wdt");
+	dt_prop(&w, "no-pmu", NULL, 0);
+	dt_end(&w);
+
 	/* GICv3 */
 	dt_begin(&w, "gic");
 	dt_prop_str(&w, "device_type", "interrupt-controller");
 	dt_prop_str(&w, "compatible", "arm,gic-v3");
+	dt_prop(&w, "interrupt-controller", NULL, 0);
+	dt_prop_u32(&w, "virtual-timer-intid", qemu ? 27 : 27); /* Tensor G2 arch virtual timer PPI 11 = INTID 27 */
 	uint64_t gic_reg[4] = { gic_dist - io_base, 0x10000, gic_redist - io_base, 0x100000 };
 	dt_prop(&w, "reg", gic_reg, sizeof(gic_reg));
 	dt_end(&w);
@@ -746,7 +766,7 @@ felix_baremetal_main(uint64_t fdt_addr)
 		const char *qcmd = "-v debug=0x8 serial=3 cpus=1";
 		memcpy(ba->commandLine, qcmd, str_len(qcmd) + 1);
 	} else {
-		const char *cmd = "-v debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress wdt=-1 wdt_test=no_user_checkin sweetusb=0 rd=ufsroot0 ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 launchd_unsecure_cache=1";
+		const char *cmd = "-v debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress wdt=-1 wdt_test=no_user_checkin sweetusb=0 sweetlog=0 rd=ufsroot0 ufsrw=0 rootrw=0 unentitled_ios_sim_launch=1 ignition_level=1 launchd_unsecure_cache=1";
 		memcpy(ba->commandLine, cmd, str_len(cmd) + 1);
 	}
 	con_str("BOOTARGS", ba->commandLine);
@@ -844,19 +864,20 @@ felix_baremetal_main(uint64_t fdt_addr)
 		}
 	}
 
-	/* Start Core 1 for UFS mailbox servicing */
-	uint64_t sec_entry_pa = 0;
-	__asm__ volatile(
-		"adrp %0, secondary_entry\n"
-		"add %0, %0, :lo12:secondary_entry\n"
-		: "=r"(sec_entry_pa)
-	);
-
-	int psci_rc = psci_cpu_on(0x81000100ULL, sec_entry_pa, 0);
-	if (psci_rc != 0) {
-		psci_rc = psci_cpu_on(0x100ULL, sec_entry_pa, 0);
+	/*
+	 * In honest UFS mode, XNU sweet_ufs directly drives the host controller.
+	 * Tensor G2 (Exynos UFS) requires Vendor Specific register (VS + 0x40 = 0x14701140)
+	 * to configure which slots accept SCSI vs Device Management.
+	 * In loader we set slot 0 to Device Management, but XNU sweet_ufs issues SCSI
+	 * commands (TUR 0x00, READ 0x28) exclusively on SLOT 0!
+	 * Setting 0x14701140 to 0xFFFFFFFF makes slot 0 accept SCSI commands!
+	 */
+	if (!qemu) {
+		*(volatile uint32_t *)(0x14701100UL + 0x40) = 0xFFFFFFFFu; /* All slots = SCSI */
+		*(volatile uint32_t *)(0x14700000UL + 0x24) = 0;           /* REG_IE = 0 */
+		*(volatile uint32_t *)(0x14700000UL + 0x58) = 0;           /* REG_UTRLDBR = 0 */
+		*(volatile uint32_t *)(0x14700000UL + 0x20) = *(volatile uint32_t *)(0x14700000UL + 0x20); /* ack REG_IS */
 	}
-	con_hex2("PSCI CORE1", "rc=", psci_rc, "alive=", g_core1_alive);
 
 	con_str("READY", "Jumping to XNU kernel in 3s...");
 

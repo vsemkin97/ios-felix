@@ -597,7 +597,7 @@ felix_baremetal_main(uint64_t fdt_addr)
 	dt_prop_u32(&w, "#size-cells", 2);
 
 	const char *cmd = qemu ? "-v debug=0x8 serial=3 cpus=1" :
-		"-v debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress wdt=-1 wdt_test=no_user_checkin sweetusb=0 sweetlog=0 rd=ufsroot0 ufsrw=0 rootrw=0 unentitled_ios_sim_launch=1 ignition_level=1 ignition_force_dylib_root=1 -ignition_force_dylib_root force_dylib_root=1 launchd_unsecure_cache=1";
+		"-v debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress wdt=-1 wdt_test=no_user_checkin sweetusb=0 sweetlog=0 rd=ufsroot0 ufsrw=0 rootrw=0 unentitled_ios_sim_launch=1 ignition_level=1 launchd_unsecure_cache=1";
 
 	dt_begin(&w, "chosen");
 	dt_prop_str(&w, "boot-args", cmd);
@@ -609,7 +609,11 @@ felix_baremetal_main(uint64_t fdt_addr)
 	dt_prop_u32(&w, "display-rotation", 0);
 	dt_prop_str(&w, "psci-method", qemu ? "hvc" : "smc");
 
-	static const uint8_t manifest_hash[48] = { 0x66, 0x65, 0x6c, 0x69, 0x78 };
+	static const uint8_t manifest_hash[48] = {
+		0x5c, 0xbe, 0x36, 0x01, 0x1d, 0x7d, 0x83, 0x15, 0x15, 0xcd, 0xf1, 0x12, 0x2a, 0x93, 0xff, 0xca,
+		0xd4, 0x8b, 0x05, 0xe9, 0x19, 0x43, 0x88, 0xad, 0x12, 0xe9, 0x75, 0x2a, 0x1a, 0xe4, 0xa5, 0xa0,
+		0xb9, 0x34, 0x00, 0x8b, 0x37, 0x98, 0x53, 0x01, 0x04, 0x1d, 0x7e, 0x08, 0x6f, 0xff, 0x52, 0x05
+	};
 	static const uint8_t no_behavior[16];
 	dt_prop_u64(&w, "unique-chip-id", 0x000052445730001ULL);
 	dt_prop_u32(&w, "chip-id", 0x8015);

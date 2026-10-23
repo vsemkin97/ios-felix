@@ -457,7 +457,7 @@ felix_baremetal_main(uint64_t fdt_addr)
 	*(volatile uint32_t *)(rdw + 0x08) = 3;                      /* version = 3 */
 	*(volatile uint32_t *)(rdw + 0x0c) = 0x2b00;                 /* size = 0x2b00 */
 	*(volatile uint32_t *)(rdw + 0x10) = 1;                      /* 1 partition */
-	*(volatile uint32_t *)(rdw + 0x14) = 256;                    /* buffer_size_kb = 256 */
+	*(volatile uint32_t *)(rdw + 0x14) = 256 * 1024;             /* buffer_size in bytes (256 KB) */
 	*(volatile uint64_t *)(rdw + 0x18) = ufs_buf_pa;             /* buffer_pa */
 
 	/* Partition 0: 'userdata' at offset 0x180 */

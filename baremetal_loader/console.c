@@ -156,18 +156,14 @@ void decon_flush(void)
 		__asm__ volatile("yield");
 	}
 
-	/* 6. Leave HW TE trigger continuously armed: 0x3061 (PixOS & pmOS standard) */
+	/* 6. Leave HW TE trigger continuously armed: 0x3061 across Felix DECONs */
 	decon1[0x30 / 4] = 0x3061;
 	decon0[0x30 / 4] = 0x3061;
-	*(volatile uint32_t *)0x1C300030UL = 0x3061;
-	*(volatile uint32_t *)0x1C200030UL = 0x3061;
 
 	/* 7. Fallback: if HW TE did not clear UPDATE_REQ, keep 0x3061 */
 	if (decon1[0x50 / 4] != 0) {
 		decon1[0x30 / 4] = 0x3061;
 		decon0[0x30 / 4] = 0x3061;
-		*(volatile uint32_t *)0x1C300030UL = 0x3061;
-		*(volatile uint32_t *)0x1C200030UL = 0x3061;
 	}
 
 	__asm__ volatile("dsb sy; isb" ::: "memory");
@@ -186,17 +182,13 @@ void decon_rearm_continuous(void)
 	}
 	__asm__ volatile("dsb sy" ::: "memory");
 
-	/* Arm continuous hardware TE trigger 0x3061 across all DECON blocks */
+	/* Arm continuous hardware TE trigger 0x3061 across Felix DECON blocks (0x1C240000 / 0x1C241000) */
 	*(volatile uint32_t *)0x1C241030UL = 0x3061;
 	*(volatile uint32_t *)0x1C240030UL = 0x3061;
-	*(volatile uint32_t *)0x1C300030UL = 0x3061;
-	*(volatile uint32_t *)0x1C200030UL = 0x3061;
 
 	/* Commit shadow update */
 	*(volatile uint32_t *)0x1C241050UL |= 0x8010003f;
 	*(volatile uint32_t *)0x1C240050UL |= 0x8010003f;
-	*(volatile uint32_t *)0x1C300050UL |= 0x8010003f;
-	*(volatile uint32_t *)0x1C200050UL |= 0x8010003f;
 
 	__asm__ volatile("dsb sy; isb" ::: "memory");
 }

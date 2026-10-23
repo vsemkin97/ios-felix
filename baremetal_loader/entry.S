@@ -23,7 +23,69 @@ _start:
 	msr	daifset, #0xf		/* Disable all interrupts */
 	mov	x19, x0			/* Preserve DTB pointer from ABL */
 
-	/* Setup stack pointer FIRST */
+	/* Check Current Exception Level */
+	mrs	x21, CurrentEL
+	lsr	x21, x21, #2
+	cmp	x21, #2
+	b.ne	.L_is_el1
+
+	/*
+	 * Running at EL2 (Google Tensor ABL entry or QEMU virt EL2).
+	 * Configure EL2 system registers and drop to EL1h before running anything else.
+	 */
+	adrp	x1, vectors
+	add	x1, x1, :lo12:vectors
+	msr	vbar_el2, x1
+	msr	vbar_el1, x1
+
+	/* HCR_EL2: Set RW bit (bit 31) -> EL1 is AArch64; AMO/IMO/FMO=0 */
+	mov	x2, #(1 << 31)
+	msr	hcr_el2, x2
+
+	/* Pass through CPU IDs */
+	mrs	x2, midr_el1
+	msr	vpidr_el2, x2
+	mrs	x2, mpidr_el1
+	msr	vmpidr_el2, x2
+
+	/*
+	 * SCTLR_EL1: ARMv8.2 RES1 bits: 11, 20, 22, 23, 28, 29 (0x30d00800).
+	 * MMU, D-cache, I-cache disabled.
+	 */
+	mov	x2, #0x0800
+	movk	x2, #0x30d0, lsl #16
+	msr	sctlr_el1, x2
+
+	/* Disable FP/SIMD traps to EL2 */
+	msr	cptr_el2, xzr
+
+	/* Disable CP15 traps to EL2 */
+	msr	hstr_el2, xzr
+
+	/* CNTHCTL_EL2: Enable EL1 physical timer and counter access (EL1PCTEN | EL1PCEN) */
+	mov	x2, #3
+	msr	cnthctl_el2, x2
+	msr	cntvoff_el2, xzr
+	msr	vttbr_el2, xzr
+
+	/* ICC_SRE_EL2: Enable GICv3 system registers at EL1 (SRE bit 0 | Enable bit 3 = 9) */
+	mrs	x2, icc_sre_el2
+	mov	x3, #9
+	orr	x2, x2, x3
+	msr	icc_sre_el2, x2
+	isb
+
+	/* Drop to EL1h at .L_is_el1 */
+	adrp	x2, .L_is_el1
+	add	x2, x2, :lo12:.L_is_el1
+	msr	elr_el2, x2
+	mov	x2, #0x3c5		/* EL1h, DAIF masked */
+	msr	spsr_el2, x2
+	mov	x0, x19
+	eret
+
+.L_is_el1:
+	/* Setup stack pointer FIRST at EL1h */
 	msr	spsel, #1
 	adrp	x1, _stack_top
 	add	x1, x1, :lo12:_stack_top

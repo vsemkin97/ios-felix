@@ -3,9 +3,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-echo "=== Launching HackiOS Bare-Metal XNU in QEMU ==="
+echo "=== Launching HackiOS Bare-Metal XNU in QEMU (EL2 Hardware Mode) ==="
 qemu-system-aarch64 \
-    -M virt,gic-version=3 \
+    -M virt,virtualization=on,gic-version=3 \
     -cpu cortex-a76 \
     -smp 1 \
     -m 6G \
@@ -13,5 +13,6 @@ qemu-system-aarch64 \
     -device ramfb \
     -display cocoa \
     -serial stdio \
+    -monitor tcp:127.0.0.1:4444,server,nowait \
     -qmp unix:/tmp/qemu-qmp.sock,server,nowait \
     -no-reboot "$@"

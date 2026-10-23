@@ -772,7 +772,23 @@ felix_baremetal_main(uint64_t fdt_addr)
 		g_ufs_hardware_ready = 1;
 		con_str("UFS", "Host DMA and link operational!");
 
-		/* Clear Unit Attention with TUR */
+		/* 1. Set fDeviceInit flag via Slot 0 Query Request */
+		int64_t fdev_rc = ufs_query_set_fdeviceinit(ufs_dma_desc_pa);
+		con_hex2("UFS FDEV SET", "rc=", (uint32_t)fdev_rc, "", 0);
+
+		/* 2. Poll until fDeviceInit reads 0 (device internal tables loaded) */
+		int64_t poll_rc = ufs_query_poll_fdeviceinit(ufs_dma_desc_pa);
+		con_hex2("UFS FDEV POLL", "rc=", (uint32_t)poll_rc, "", 0);
+
+		/* 3. Send START STOP UNIT to transition LUN 0 to ACTIVE power state */
+		int64_t pwr_rc = ufs_scsi_start_stop(ufs_dma_desc_pa, 0, 1);
+		con_hex2("UFS PWR ACTIVE", "rc=", (uint32_t)pwr_rc, "", 0);
+
+		/* 4. Request Sense to clear Unit Attention */
+		static uint8_t sense_buf[64] __attribute__((aligned(64)));
+		ufs_scsi_request_sense(ufs_dma_desc_pa, 0, sense_buf);
+
+		/* 5. Clear Unit Attention with TUR */
 		for (int i = 0; i < 3; i++) {
 			int64_t tur_rc = ufs_scsi_tur(ufs_dma_desc_pa, 0);
 			con_hex2("UFS TUR", "try=", i, "rc=", (uint32_t)tur_rc);

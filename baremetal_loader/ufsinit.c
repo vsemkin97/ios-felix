@@ -382,8 +382,8 @@ void ufs_init_host_dma(uint64_t dma_pa)
 	wr(HCI + 0x54, (uint32_t)(dma_pa >> 32));
 	__asm__ volatile("dsb sy" ::: "memory");
 
-	/* Enable all slots for SCSI */
-	wr(VS + 0x40, 0xFFFFFFFFu);
+	/* Slot 0 = Device Management (NOP/Query), Slots 1..31 = SCSI */
+	wr(VS + 0x40, 0xFFFFFFFEu);
 
 	/* Enable transfer request list running */
 	wr(HCI + 0x60, 1);
@@ -393,7 +393,7 @@ void ufs_init_host_dma(uint64_t dma_pa)
 	poll(HCI + 0x30, 0x2, 0x2, 100000);
 }
 
-int64_t ufs_scsi_tur(uint64_t dma_pa, uint8_t lun)
+int64_t ufs_query_set_fdeviceinit(uint64_t dma_pa)
 {
 	const unsigned slot = 0;
 	const uint32_t slot_bit = 1u << slot;
@@ -401,6 +401,243 @@ int64_t ufs_scsi_tur(uint64_t dma_pa, uint8_t lun)
 	volatile struct utrd *utrd = (volatile struct utrd *)dma_pa + slot;
 	volatile struct ucd *ucd = (volatile struct ucd *)(dma_pa + 0x800);
 	uint64_t ucd_pa = dma_pa + 0x800;
+
+	for (int i = 0; i < 512; i++) {
+		ucd->cmd[i] = 0;
+		ucd->resp[i] = 0;
+	}
+
+	ucd->cmd[0] = 0x16; /* UPIU_TRANSACTION_QUERY_REQ */
+	ucd->cmd[1] = 0x00; /* Flags */
+	ucd->cmd[2] = 0x00; /* LUN = 0 */
+	ucd->cmd[3] = 0x01; /* Task Tag = 1 */
+	ucd->cmd[4] = 0x00; /* Command set type = 0 */
+	ucd->cmd[5] = 0x81; /* Query Function: UPIU_QUERY_FUNC_STANDARD_WRITE_REQUEST (0x81) */
+	ucd->cmd[6] = 0x00;
+	ucd->cmd[7] = 0x00;
+	ucd->cmd[12] = 0x06; /* Opcode: UPIU_QUERY_OPCODE_SET_FLAG (0x06) */
+	ucd->cmd[13] = 0x01; /* IDN: QUERY_FLAG_IDN_FDEVICEINIT (0x01) */
+
+	/* CT = 2 (UTP_CMD_TYPE_DEV_MANAGE), DD = 0 (none), I = 1 */
+	utrd->dw0 = (2u << 28) | (0u << 25) | (1u << 24);
+	utrd->dw1 = 0;
+	utrd->dw2 = 0x0f;
+	utrd->dw3 = 0;
+	utrd->ucdba = (uint32_t)ucd_pa;
+	utrd->ucdbau = (uint32_t)(ucd_pa >> 32);
+	utrd->resp = ((512u / 4) << 16) | (512u / 4);
+	utrd->prdt = 0;
+
+	__asm__ volatile("dsb sy" ::: "memory");
+	wr(HCI + 0x58, slot_bit);
+
+	uint64_t end = now() + (uint64_t)1000000 * counter_freq() / 1000000;
+	while (rd(HCI + 0x58) & slot_bit) {
+		if (now() > end) {
+			wr(HCI + 0x5c, slot_bit);
+			return -1;
+		}
+	}
+
+	__asm__ volatile("dsb sy" ::: "memory");
+	wr(HCI + 0x20, rd(HCI + 0x20));
+
+	uint32_t ocs = utrd->dw2 & 0xff;
+	if (ocs == 0 && ucd->resp[0] == 0x36 && ucd->resp[6] == 0) {
+		return 0;
+	}
+	return (int64_t)(0xE100000000000000ULL | ((uint64_t)ocs << 24) |
+	                 ((uint64_t)ucd->resp[0] << 16) | ((uint64_t)ucd->resp[6] << 8) |
+	                 (uint64_t)ucd->resp[7]);
+}
+
+int64_t ufs_query_poll_fdeviceinit(uint64_t dma_pa)
+{
+	const unsigned slot = 0;
+	const uint32_t slot_bit = 1u << slot;
+
+	volatile struct utrd *utrd = (volatile struct utrd *)dma_pa + slot;
+	volatile struct ucd *ucd = (volatile struct ucd *)(dma_pa + 0x800);
+	uint64_t ucd_pa = dma_pa + 0x800;
+
+	for (int poll_count = 0; poll_count < 100; poll_count++) {
+		for (int i = 0; i < 512; i++) {
+			ucd->cmd[i] = 0;
+			ucd->resp[i] = 0;
+		}
+
+		ucd->cmd[0] = 0x16; /* UPIU_TRANSACTION_QUERY_REQ */
+		ucd->cmd[1] = 0x00; /* Flags */
+		ucd->cmd[2] = 0x00; /* LUN = 0 */
+		ucd->cmd[3] = 0x01; /* Task Tag = 1 */
+		ucd->cmd[4] = 0x00;
+		ucd->cmd[5] = 0x01; /* Query Function: UPIU_QUERY_FUNC_STANDARD_READ_REQUEST (0x01) */
+		ucd->cmd[6] = 0x00;
+		ucd->cmd[7] = 0x00;
+		ucd->cmd[12] = 0x05; /* Opcode: UPIU_QUERY_OPCODE_READ_FLAG (0x05) */
+		ucd->cmd[13] = 0x01; /* IDN: QUERY_FLAG_IDN_FDEVICEINIT (0x01) */
+
+		/* CT = 2 (UTP_CMD_TYPE_DEV_MANAGE), DD = 0 (none), I = 1 */
+		utrd->dw0 = (2u << 28) | (0u << 25) | (1u << 24);
+		utrd->dw1 = 0;
+		utrd->dw2 = 0x0f;
+		utrd->dw3 = 0;
+		utrd->ucdba = (uint32_t)ucd_pa;
+		utrd->ucdbau = (uint32_t)(ucd_pa >> 32);
+		utrd->resp = ((512u / 4) << 16) | (512u / 4);
+		utrd->prdt = 0;
+
+		__asm__ volatile("dsb sy" ::: "memory");
+		wr(HCI + 0x58, slot_bit);
+
+		uint64_t end = now() + (uint64_t)1000000 * counter_freq() / 1000000;
+		while (rd(HCI + 0x58) & slot_bit) {
+			if (now() > end) {
+				wr(HCI + 0x5c, slot_bit);
+				return -1;
+			}
+		}
+
+		__asm__ volatile("dsb sy" ::: "memory");
+		wr(HCI + 0x20, rd(HCI + 0x20));
+
+		uint32_t ocs = utrd->dw2 & 0xff;
+		if (ocs == 0 && ucd->resp[0] == 0x36 && ucd->resp[6] == 0) {
+			uint8_t flag_val = ucd->resp[23];
+			if (flag_val == 0) {
+				return 0; /* Device initialization complete! */
+			}
+		}
+		udelay(10000); /* 10ms */
+	}
+	return -2; /* timeout */
+}
+
+int64_t ufs_scsi_start_stop(uint64_t dma_pa, uint8_t lun, int start)
+{
+	const unsigned slot = 1;
+	const uint32_t slot_bit = 1u << slot;
+
+	volatile struct utrd *utrd = (volatile struct utrd *)dma_pa + slot;
+	volatile struct ucd *ucd = (volatile struct ucd *)(dma_pa + 0x1000);
+	uint64_t ucd_pa = dma_pa + 0x1000;
+
+	for (int i = 0; i < 512; i++) {
+		ucd->cmd[i] = 0;
+		ucd->resp[i] = 0;
+	}
+
+	ucd->cmd[0] = 0x01; /* COMMAND UPIU */
+	ucd->cmd[1] = 0x00; /* No data transfer */
+	ucd->cmd[2] = lun;
+	ucd->cmd[3] = slot + 1;
+	ucd->cmd[16] = 0x1b; /* START STOP UNIT */
+	ucd->cmd[20] = start ? 0x01 : 0x00; /* START = 1 */
+
+	utrd->dw0 = (1u << 28) | (0u << 25) | (1u << 24); /* CT=1 (UFS), DD=0 (none), I=1 */
+	utrd->dw1 = 0;
+	utrd->dw2 = 0x0f;
+	utrd->dw3 = 0;
+	utrd->ucdba = (uint32_t)ucd_pa;
+	utrd->ucdbau = (uint32_t)(ucd_pa >> 32);
+	utrd->resp = ((512u / 4) << 16) | (512u / 4);
+	utrd->prdt = 0;
+
+	__asm__ volatile("dsb sy" ::: "memory");
+	wr(HCI + 0x58, slot_bit);
+
+	uint64_t end = now() + (uint64_t)1000000 * counter_freq() / 1000000;
+	while (rd(HCI + 0x58) & slot_bit) {
+		if (now() > end) {
+			wr(HCI + 0x5c, slot_bit);
+			return -1;
+		}
+	}
+
+	__asm__ volatile("dsb sy" ::: "memory");
+	wr(HCI + 0x20, rd(HCI + 0x20));
+
+	uint32_t ocs = utrd->dw2 & 0xff;
+	if (ocs == 0 && ucd->resp[0] == 0x21 && ucd->resp[6] == 0 && ucd->resp[7] == 0) {
+		return 0;
+	}
+	return (int64_t)(0xE200000000000000ULL | ((uint64_t)ocs << 24) |
+	                 ((uint64_t)ucd->resp[0] << 16) | ((uint64_t)ucd->resp[6] << 8) |
+	                 (uint64_t)ucd->resp[7]);
+}
+
+int64_t ufs_scsi_request_sense(uint64_t dma_pa, uint8_t lun, void *sense_buf)
+{
+	const unsigned slot = 1;
+	const uint32_t slot_bit = 1u << slot;
+
+	volatile struct utrd *utrd = (volatile struct utrd *)dma_pa + slot;
+	volatile struct ucd *ucd = (volatile struct ucd *)(dma_pa + 0x1000);
+	uint64_t ucd_pa = dma_pa + 0x1000;
+	uint64_t buf_pa = (uint64_t)(uintptr_t)sense_buf;
+
+	for (int i = 0; i < 512; i++) {
+		ucd->cmd[i] = 0;
+		ucd->resp[i] = 0;
+	}
+
+	ucd->cmd[0] = 0x01; /* COMMAND UPIU */
+	ucd->cmd[1] = 0x40; /* Data IN (READ) */
+	ucd->cmd[2] = lun;
+	ucd->cmd[3] = slot + 1;
+	ucd->cmd[12] = 0;
+	ucd->cmd[13] = 0;
+	ucd->cmd[14] = 0;
+	ucd->cmd[15] = 18; /* 18 bytes */
+
+	ucd->cmd[16] = 0x03; /* REQUEST SENSE */
+	ucd->cmd[20] = 18; /* allocation length */
+
+	utrd->dw0 = (1u << 28) | (2u << 25) | (1u << 24); /* CT=1 (UFS), DD=2 (dev->host), I=1 */
+	utrd->dw1 = 0;
+	utrd->dw2 = 0x0f;
+	utrd->dw3 = 0;
+	utrd->ucdba = (uint32_t)ucd_pa;
+	utrd->ucdbau = (uint32_t)(ucd_pa >> 32);
+	utrd->resp = ((512u / 4) << 16) | (512u / 4);
+
+	ucd->prdt[0].addr_lo = (uint32_t)buf_pa;
+	ucd->prdt[0].addr_hi = (uint32_t)(buf_pa >> 32);
+	ucd->prdt[0].rsvd = 0;
+	ucd->prdt[0].dbc = 18 - 1;
+	utrd->prdt = ((1024u / 4) << 16) | 1;
+
+	__asm__ volatile("dsb sy" ::: "memory");
+	wr(HCI + 0x58, slot_bit);
+
+	uint64_t end = now() + (uint64_t)1000000 * counter_freq() / 1000000;
+	while (rd(HCI + 0x58) & slot_bit) {
+		if (now() > end) {
+			wr(HCI + 0x5c, slot_bit);
+			return -1;
+		}
+	}
+
+	__asm__ volatile("dsb sy" ::: "memory");
+	wr(HCI + 0x20, rd(HCI + 0x20));
+
+	uint32_t ocs = utrd->dw2 & 0xff;
+	if (ocs == 0 && ucd->resp[0] == 0x21 && ucd->resp[6] == 0 && ucd->resp[7] == 0) {
+		return 0;
+	}
+	return (int64_t)(0xE300000000000000ULL | ((uint64_t)ocs << 24) |
+	                 ((uint64_t)ucd->resp[0] << 16) | ((uint64_t)ucd->resp[6] << 8) |
+	                 (uint64_t)ucd->resp[7]);
+}
+
+int64_t ufs_scsi_tur(uint64_t dma_pa, uint8_t lun)
+{
+	const unsigned slot = 1;
+	const uint32_t slot_bit = 1u << slot;
+
+	volatile struct utrd *utrd = (volatile struct utrd *)dma_pa + slot;
+	volatile struct ucd *ucd = (volatile struct ucd *)(dma_pa + 0x1000);
+	uint64_t ucd_pa = dma_pa + 0x1000;
 
 	for (int i = 0; i < 512; i++) {
 		ucd->cmd[i] = 0;
@@ -447,12 +684,12 @@ int64_t ufs_scsi_tur(uint64_t dma_pa, uint8_t lun)
 
 static int64_t ufs_scsi_read_once(uint64_t dma_pa, uint8_t lun, uint64_t lba, uint32_t count_blocks, void *bounce_ptr)
 {
-	const unsigned slot = 0;
+	const unsigned slot = 1;
 	const uint32_t slot_bit = 1u << slot;
 
 	volatile struct utrd *utrd = (volatile struct utrd *)dma_pa + slot;
-	volatile struct ucd *ucd = (volatile struct ucd *)(dma_pa + 0x800);
-	uint64_t ucd_pa = dma_pa + 0x800;
+	volatile struct ucd *ucd = (volatile struct ucd *)(dma_pa + 0x1000);
+	uint64_t ucd_pa = dma_pa + 0x1000;
 	uint64_t bounce_pa = (uint64_t)(uintptr_t)bounce_ptr;
 	uint32_t len = count_blocks * 4096;
 
@@ -553,6 +790,11 @@ int64_t ufs_scsi_read(uint64_t dma_pa, uint8_t lun, uint64_t lba, uint32_t count
 		rc = ufs_scsi_read_once(dma_pa, lun, lba, count_blocks, bounce_ptr);
 		if (rc == 0)
 			return 0;
+		/* If Check Condition (0x02), clear it with Request Sense */
+		if ((rc & 0xFF) == 0x02) {
+			static uint8_t sbuf[64];
+			ufs_scsi_request_sense(dma_pa, lun, sbuf);
+		}
 		udelay(1000);
 	}
 	return rc;

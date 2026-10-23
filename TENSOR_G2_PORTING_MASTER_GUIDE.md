@@ -241,7 +241,7 @@ The base Mach-O kernel is derived from genuine Darwin XNU 22.6.0 (iOS 16.7.16, D
 | **Milestone 7** | `milestone-7-apple-userland-bootstrap` | Patched `_shared_region_map_and_slide_setup` (UID 501 bypass). Loaded Apple System Keybag (`SWEET AKS`). Parsed 532 LaunchDaemons. |
 | **Milestone 8** | `milestone-8-springboard-execution` | Patched `_sleh_serror` to suppress asynchronous SErrors. `SpringBoard` spawned (PID 25/26), Mach-O headers mapped into userspace. |
 | **Milestone 9** | `milestone-9-ios-full-userland-backboardd-springboard` (`aff9851`) | **Full iOS multi-daemon execution:** Restricted `win_size` to 320 MB to avoid TZASC carveouts. `backboardd` active with 16 SMP threads. Zero kernel panics. |
-| **Display Integration** | Commit `3169d37` | Diagnosed SpringBoard CADisplay crash loop. Added `sweet,display` node (`disp0`) to `arm-io` and `sweetfb_native=1` for `AppleCLCD`. |
+| **Milestone 10** | `milestone-10-apple-logo-graphics-springboard` (`3169d37`) | **GENUINE APPLE BOOT LOGO & PROGRESS BAR RENDERED ON PHYSICAL AMOLED!** CoreAnimation CADisplay successfully bound to AppleCLCD / IOMobileFramebuffer. `backboardd` active with 24 SMP threads, `SpringBoard` multithreaded. |
 
 ---
 

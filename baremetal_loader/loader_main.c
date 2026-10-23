@@ -596,7 +596,11 @@ felix_baremetal_main(uint64_t fdt_addr)
 	dt_prop_u32(&w, "#address-cells", 2);
 	dt_prop_u32(&w, "#size-cells", 2);
 
+	const char *cmd = qemu ? "-v debug=0x8 serial=3 cpus=1" :
+		"-v debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress wdt=-1 wdt_test=no_user_checkin sweetusb=0 sweetlog=0 rd=ufsroot0 ufsrw=0 rootrw=0 unentitled_ios_sim_launch=1 ignition_level=1 ignition_force_dylib_root=1 -ignition_force_dylib_root force_dylib_root=1 launchd_unsecure_cache=1";
+
 	dt_begin(&w, "chosen");
+	dt_prop_str(&w, "boot-args", cmd);
 	dt_prop(&w, "random-seed", seed, sizeof(seed));
 	dt_prop_u64(&w, "dram-base", phys_base);
 	dt_prop_u64(&w, "dram-size", win_size);
@@ -612,14 +616,17 @@ felix_baremetal_main(uint64_t fdt_addr)
 	dt_prop_u32(&w, "board-id", 0x06);
 	dt_prop(&w, "boot-manifest-hash", manifest_hash, sizeof(manifest_hash));
 	dt_prop(&w, "software-behavior", no_behavior, sizeof(no_behavior));
-	dt_prop_str(&w, "firmware-version", "iBoot-8422.100.650");
-	dt_prop_u32(&w, "certificate-production-status", 1);
+	dt_prop_str(&w, "crypto-hash-method", "sha2-384");
+	dt_prop_str(&w, "firmware-version", "felix-shim");
+	dt_prop_str(&w, "system-firmware-version", "felix-shim");
+	dt_prop_u32(&w, "certificate-production-status", 0);
 	dt_prop_u32(&w, "certificate-security-mode", 1);
-	dt_prop_u32(&w, "effective-production-status-ap", 1);
+	dt_prop_u32(&w, "effective-production-status-ap", 0);
 	dt_prop_u32(&w, "effective-security-mode-ap", 1);
-	dt_prop_u32(&w, "secure-boot", 1);
-	dt_prop_u32(&w, "production-cert", 1);
-	dt_prop_u32(&w, "development-cert", 0);
+	dt_prop_u32(&w, "effective-security-mode-sep", 1);
+	dt_prop_u32(&w, "secure-boot", 0);
+	dt_prop_u32(&w, "production-cert", 0);
+	dt_prop_u32(&w, "development-cert", 1);
 	dt_prop_u32(&w, "embedded-panic-log-size", 0x100000);
 
 	static uint8_t nvram_image[NVRAM_BANK_SIZE];
@@ -711,7 +718,7 @@ felix_baremetal_main(uint64_t fdt_addr)
 
 	/* wdt */
 	dt_begin(&w, "wdt");
-	dt_prop(&w, "no-pmu", NULL, 0);
+	dt_prop_u32(&w, "no-pmu", 1);
 	dt_end(&w);
 
 	/* GICv3 */
@@ -762,13 +769,7 @@ felix_baremetal_main(uint64_t fdt_addr)
 	ba->deviceTreeP = virt_base + (dt_pa - phys_base); /* EXACT virtual address! */
 	ba->deviceTreeLength = dt_len;
 
-	if (qemu) {
-		const char *qcmd = "-v debug=0x8 serial=3 cpus=1";
-		memcpy(ba->commandLine, qcmd, str_len(qcmd) + 1);
-	} else {
-		const char *cmd = "-v debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress wdt=-1 wdt_test=no_user_checkin sweetusb=0 sweetlog=0 rd=ufsroot0 ufsrw=0 rootrw=0 unentitled_ios_sim_launch=1 ignition_level=1 ignition_force_dylib_root=1 launchd_unsecure_cache=1";
-		memcpy(ba->commandLine, cmd, str_len(cmd) + 1);
-	}
+	memcpy(ba->commandLine, cmd, str_len(cmd) + 1);
 	con_str("BOOTARGS", ba->commandLine);
 	decon_flush();
 

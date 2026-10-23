@@ -507,7 +507,21 @@ felix_baremetal_main(uint64_t fdt_addr)
 
 	dt_begin(&w, "defaults");
 	dt_prop_u32(&w, "kern.vm_compressor", 2);
+	dt_prop_u32(&w, "no-effaceable-storage", 1);
 	dt_end(&w);
+
+	dt_begin(&w, "buttons");
+	dt_prop_u32(&w, "home-button-type", 2);
+	dt_prop_u32(&w, "opposed-power-vol-buttons", 1);
+	dt_end(&w);
+
+	if (!qemu) {
+		dt_begin(&w, "sweet-ufs");
+		dt_prop_str(&w, "compatible", "google,gs101-ufs");
+		uint64_t ufs_reg[2] = { 0x14700000ULL, 0x200ULL };
+		dt_prop(&w, "reg", ufs_reg, sizeof(ufs_reg));
+		dt_end(&w);
+	}
 
 	dt_begin(&w, "product");
 	dt_identity(&w, identity_product, sizeof(identity_product) / sizeof(identity_product[0]), identity_product_data);
@@ -590,7 +604,9 @@ felix_baremetal_main(uint64_t fdt_addr)
 	ba->deviceTreeP = KERNEL_VIRT_BASE + (dt_pa - phys_base); /* EXACT virtual address! */
 	ba->deviceTreeLength = dt_len;
 
-	const char *cmd = "-v debug=0x8 serial=3 cpus=1";
+	const char *cmd = qemu ?
+		"-v debug=0x8 serial=3 cpus=1" :
+		"-v debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress wdt=-1 wdt_test=no_user_checkin sweetusb=0 rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 launchd_unsecure_cache=1";
 	memcpy(ba->commandLine, cmd, str_len(cmd) + 1);
 	con_str("BOOTARGS", ba->commandLine);
 	decon_flush();

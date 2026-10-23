@@ -8,7 +8,8 @@
 #include "console.h"
 #include "identity_felix.h"
 
-#define KERNEL_VIRT_BASE    0xfffffff007004000ULL
+static uint64_t g_virt_base = 0xfffffe0007004000ULL;
+static uint64_t g_phys_base = 0xA0004000ULL;
 #define PAGE_SIZE_MAX       0x4000ULL
 #define BOOT_LINE_LENGTH    608
 #define NVRAM_BANK_SIZE     0x2000u
@@ -294,8 +295,8 @@ on_xnu_exception(uint64_t log_pa, uint64_t log_len, uint64_t code,
 		con_hex("FAR", far);
 		con_hex("LR", lr);
 		con_hex("SP", sp);
-		if (esr >= KERNEL_VIRT_BASE && esr < KERNEL_VIRT_BASE + 0x2000000ULL) {
-			const char *msg = (const char *)(esr - KERNEL_VIRT_BASE + 0x80000000ULL);
+		if (g_virt_base && esr >= g_virt_base && esr < g_virt_base + 0x2000000ULL) {
+			const char *msg = (const char *)(esr - g_virt_base + g_phys_base);
 			con_str("MSG", msg);
 		}
 	}
@@ -394,14 +395,9 @@ felix_baremetal_main(uint64_t fdt_addr)
 
 	con_hex2("KERNEL", "size=", (uint32_t)kernel_size, "ncmds=", mh->ncmds);
 
-	/* Memory Layout: Must match 2MB block offset of KERNEL_VIRT_BASE (0x4000) */
-	uint64_t phys_base = 0xA0000000ULL + (KERNEL_VIRT_BASE & (0x200000ULL - 1));
-	uint64_t win_size  = 0x50000000ULL; /* 1.25 GB */
-	uint64_t slide     = phys_base - KERNEL_VIRT_BASE;
-
 	uint64_t vm_lo = ~0ULL, vm_hi = 0, entry_va = 0;
 
-	/* 3. Parse segments */
+	/* 3. Parse segments first to dynamically detect virtual base and entry */
 	const struct load_command *lc = (const struct load_command *)(mh + 1);
 	for (uint32_t i = 0; i < mh->ncmds; i++, lc = (const void *)((const uint8_t *)lc + lc->cmdsize)) {
 		if (lc->cmd == LC_SEGMENT_64) {
@@ -414,6 +410,15 @@ felix_baremetal_main(uint64_t fdt_addr)
 			entry_va = ((const uint64_t *)((const uint8_t *)lc + 16))[32];
 		}
 	}
+
+	uint64_t virt_base = vm_lo;
+	g_virt_base = virt_base;
+
+	/* Memory Layout: Must match 2MB block offset of virt_base (0x4000) */
+	uint64_t phys_base = 0xA0000000ULL + (virt_base & (0x200000ULL - 1));
+	g_phys_base = phys_base;
+	uint64_t win_size  = 0x50000000ULL; /* 1.25 GB */
+	uint64_t slide     = phys_base - virt_base;
 
 	uint64_t entry_pa = entry_va + slide;
 	uint64_t kern_lo = vm_lo + slide;
@@ -521,6 +526,14 @@ felix_baremetal_main(uint64_t fdt_addr)
 		uint64_t ufs_reg[2] = { 0x14700000ULL, 0x200ULL };
 		dt_prop(&w, "reg", ufs_reg, sizeof(ufs_reg));
 		dt_end(&w);
+
+		dt_begin(&w, "sweet-fbcon");
+		uint64_t fb_reg[2] = { FB_OUTER_BASE, (uint64_t)FB_H * (uint64_t)FB_STRIDE };
+		dt_prop(&w, "reg", fb_reg, sizeof(fb_reg));
+		dt_prop_u32(&w, "width", FB_W);
+		dt_prop_u32(&w, "height", FB_H);
+		dt_prop_u32(&w, "stride", FB_STRIDE);
+		dt_end(&w);
 	}
 
 	dt_begin(&w, "product");
@@ -564,6 +577,7 @@ felix_baremetal_main(uint64_t fdt_addr)
 	dt_prop_str(&w, "compatible", "arm,gic-v3");
 	uint64_t gic_reg[4] = { gic_dist - io_base, 0x10000, gic_redist - io_base, 0x100000 };
 	dt_prop(&w, "reg", gic_reg, sizeof(gic_reg));
+	dt_prop_u32(&w, "virtual-timer-intid", 27);
 	dt_end(&w);
 
 	if (uart_addr != 0) {
@@ -590,7 +604,7 @@ felix_baremetal_main(uint64_t fdt_addr)
 	memset(ba, 0, sizeof(*ba));
 	ba->revision = 2;
 	ba->version = 2;
-	ba->virtBase = KERNEL_VIRT_BASE;
+	ba->virtBase = virt_base;
 	ba->physBase = phys_base;
 	ba->memSize = win_size;
 	ba->memSizeActual = win_size;
@@ -601,7 +615,7 @@ felix_baremetal_main(uint64_t fdt_addr)
 	ba->video.v_width = FB_W;
 	ba->video.v_height = FB_H;
 	ba->video.v_depth = 32;
-	ba->deviceTreeP = KERNEL_VIRT_BASE + (dt_pa - phys_base); /* EXACT virtual address! */
+	ba->deviceTreeP = virt_base + (dt_pa - phys_base); /* EXACT virtual address! */
 	ba->deviceTreeLength = dt_len;
 
 	const char *cmd = qemu ?

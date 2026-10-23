@@ -7,7 +7,7 @@ LLD="/opt/homebrew/bin/ld.lld"
 OBJCOPY="/opt/homebrew/opt/llvm/bin/llvm-objcopy"
 NM="/opt/homebrew/opt/llvm/bin/llvm-nm"
 READELF="/opt/homebrew/opt/llvm/bin/llvm-readelf"
-KERNEL="../prebuilt/mach.development.bcm2837"
+KERNEL="${1:-../prebuilt/kernel.development.felix}"
 
 echo "=== [1/6] Embedding XNU Kernel Mach-O ==="
 cp "$KERNEL" kernel.macho

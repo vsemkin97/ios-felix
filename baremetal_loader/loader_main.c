@@ -9,7 +9,8 @@
 #include "identity_felix.h"
 #include "ufsinit.h"
 
-#define KERNEL_VIRT_BASE    0xfffffff007004000ULL
+static uint64_t g_virt_base = 0xfffffff007004000ULL;
+static uint64_t g_phys_base = 0xA0004000ULL;
 #define PAGE_SIZE_MAX       0x4000ULL
 #define BOOT_LINE_LENGTH    608
 #define NVRAM_BANK_SIZE     0x2000u
@@ -364,8 +365,8 @@ on_xnu_exception(uint64_t log_pa, uint64_t log_len, uint64_t code,
 		con_hex("FAR", far);
 		con_hex("LR", lr);
 		con_hex("SP", sp);
-		if (esr >= KERNEL_VIRT_BASE && esr < KERNEL_VIRT_BASE + 0x2000000ULL) {
-			const char *msg = (const char *)(esr - KERNEL_VIRT_BASE + 0x80000000ULL);
+		if (g_virt_base && esr >= g_virt_base && esr < g_virt_base + 0x2000000ULL) {
+			const char *msg = (const char *)(esr - g_virt_base + g_phys_base);
 			con_str("MSG", msg);
 		}
 	}
@@ -464,14 +465,9 @@ felix_baremetal_main(uint64_t fdt_addr)
 
 	con_hex2("KERNEL", "size=", (uint32_t)kernel_size, "ncmds=", mh->ncmds);
 
-	/* Memory Layout: Must match 2MB block offset of KERNEL_VIRT_BASE (0x4000) */
-	uint64_t phys_base = 0xA0000000ULL + (KERNEL_VIRT_BASE & (0x200000ULL - 1));
-	uint64_t win_size  = 0x50000000ULL; /* 1.25 GB */
-	uint64_t slide     = phys_base - KERNEL_VIRT_BASE;
-
 	uint64_t vm_lo = ~0ULL, vm_hi = 0, entry_va = 0;
 
-	/* 3. Parse segments */
+	/* 3. Parse segments first to dynamically detect virtual base and entry */
 	const struct load_command *lc = (const struct load_command *)(mh + 1);
 	for (uint32_t i = 0; i < mh->ncmds; i++, lc = (const void *)((const uint8_t *)lc + lc->cmdsize)) {
 		if (lc->cmd == LC_SEGMENT_64) {
@@ -484,6 +480,20 @@ felix_baremetal_main(uint64_t fdt_addr)
 			entry_va = ((const uint64_t *)((const uint8_t *)lc + 16))[32];
 		}
 	}
+
+	uint64_t virt_base = vm_lo;
+	g_virt_base = virt_base;
+
+	/*
+	 * Block alignment:
+	 * 16KB page kernels (Sweet, 0xfffffe00...) use 32MB L2 blocks (0x2000000).
+	 * 4KB page kernels (Redwood, 0xfffffff0...) use 2MB L2 blocks (0x200000).
+	 */
+	uint64_t blk_align = (virt_base == 0xfffffe0007004000ULL) ? 0x2000000ULL : 0x200000ULL;
+	uint64_t phys_base = 0xA0000000ULL + (virt_base & (blk_align - 1));
+	g_phys_base = phys_base;
+	uint64_t win_size  = 0x50000000ULL; /* 1.25 GB */
+	uint64_t slide     = phys_base - virt_base;
 
 	uint64_t entry_pa = entry_va + slide;
 	uint64_t kern_lo = vm_lo + slide;
@@ -636,6 +646,14 @@ felix_baremetal_main(uint64_t fdt_addr)
 		uint64_t ufs_reg[2] = { 0x14700000ULL, 0x200ULL };
 		dt_prop(&w, "reg", ufs_reg, sizeof(ufs_reg));
 		dt_end(&w);
+
+		dt_begin(&w, "sweet-fbcon");
+		uint64_t fb_reg[2] = { FB_OUTER_BASE, (uint64_t)FB_H * (uint64_t)FB_STRIDE };
+		dt_prop(&w, "reg", fb_reg, sizeof(fb_reg));
+		dt_prop_u32(&w, "width", FB_W);
+		dt_prop_u32(&w, "height", FB_H);
+		dt_prop_u32(&w, "stride", FB_STRIDE);
+		dt_end(&w);
 	}
 
 	dt_begin(&w, "product");
@@ -705,7 +723,7 @@ felix_baremetal_main(uint64_t fdt_addr)
 	memset(ba, 0, sizeof(*ba));
 	ba->revision = 2;
 	ba->version = 2;
-	ba->virtBase = KERNEL_VIRT_BASE;
+	ba->virtBase = virt_base;
 	ba->physBase = phys_base;
 	ba->memSize = win_size;
 	ba->memSizeActual = win_size;
@@ -716,25 +734,15 @@ felix_baremetal_main(uint64_t fdt_addr)
 	ba->video.v_width = FB_W;
 	ba->video.v_height = FB_H;
 	ba->video.v_depth = 32;
-	ba->deviceTreeP = KERNEL_VIRT_BASE + (dt_pa - phys_base); /* EXACT virtual address! */
+	ba->deviceTreeP = virt_base + (dt_pa - phys_base); /* EXACT virtual address! */
 	ba->deviceTreeLength = dt_len;
 
 	if (qemu) {
 		const char *qcmd = "-v debug=0x8 serial=3 cpus=1";
 		memcpy(ba->commandLine, qcmd, str_len(qcmd) + 1);
 	} else {
-		/* Format cmd with dynamic ufs_shared_pa physical address */
-		char *dst = ba->commandLine;
-		const char *prefix = "-v debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress wdt=-1 wdt_test=no_user_checkin sweetusb=0 rd=md0 ufs_native=1 unentitled_ios_sim_launch=1 ignition_level=1 launchd_unsecure_cache=1 ufs_shared_pa=0x";
-		while (*prefix) *dst++ = *prefix++;
-		/* Convert rdw_pa to hex string */
-		for (int s = 60; s >= 0; s -= 4) {
-			uint32_t nib = (rdw_pa >> s) & 0xf;
-			if (s == 0 || (rdw_pa >> s) != 0 || dst > ba->commandLine + 200) {
-				*dst++ = "0123456789abcdef"[nib];
-			}
-		}
-		*dst = 0;
+		const char *cmd = "-v debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress wdt=-1 wdt_test=no_user_checkin sweetusb=0 rd=ufsroot0 ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 launchd_unsecure_cache=1";
+		memcpy(ba->commandLine, cmd, str_len(cmd) + 1);
 	}
 	con_str("BOOTARGS", ba->commandLine);
 	decon_flush();

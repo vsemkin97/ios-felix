@@ -7,7 +7,7 @@ LLD="/opt/homebrew/bin/ld.lld"
 OBJCOPY="/opt/homebrew/opt/llvm/bin/llvm-objcopy"
 NM="/opt/homebrew/opt/llvm/bin/llvm-nm"
 READELF="/opt/homebrew/opt/llvm/bin/llvm-readelf"
-KERNEL="../prebuilt/mach.development.bcm2837"
+KERNEL="kernel_sweet_ci_patched.macho"
 
 echo "=== [0/6] Compiling Userspace Test Launchd Binary ==="
 clang -target arm64-apple-macos -nostdlib -static -fno-stack-protector -e __start test_init.c -o test_launchd.bin

@@ -311,6 +311,49 @@ on_xnu_exception(uint64_t log_pa, uint64_t log_len, uint64_t code,
 
 
 
+static void
+ramfb_init_qemu(uint64_t fb, uint32_t w, uint32_t h, uint32_t stride)
+{
+	static struct {
+		uint64_t addr;
+		uint32_t fourcc, flags, width, height, stride;
+	} __attribute__((packed)) cfg;
+	static struct {
+		uint32_t control, length;
+		uint64_t address;
+	} dma;
+	struct {
+		uint32_t size;
+		uint16_t select, reserved;
+		char name[56];
+	} file;
+	uint32_t count, select = 0;
+
+	*(volatile uint16_t *)(0x09020000ULL + 8) = __builtin_bswap16(0x19);
+	for (uint32_t i = 0; i < sizeof(count); i++)
+		((uint8_t *)&count)[i] = *(volatile uint8_t *)0x09020000ULL;
+	count = __builtin_bswap32(count);
+	for (uint32_t i = 0; i < count && i < 256 && select == 0; i++) {
+		for (uint32_t j = 0; j < sizeof(file); j++)
+			((uint8_t *)&file)[j] = *(volatile uint8_t *)0x09020000ULL;
+		if (str_eq(file.name, "etc/ramfb"))
+			select = __builtin_bswap16(file.select);
+	}
+	if (select == 0) return;
+
+	cfg.addr = __builtin_bswap64(fb);
+	cfg.fourcc = __builtin_bswap32(0x34325258); /* 'XR24' */
+	cfg.flags = 0;
+	cfg.width = __builtin_bswap32(w);
+	cfg.height = __builtin_bswap32(h);
+	cfg.stride = __builtin_bswap32(stride);
+
+	dma.control = __builtin_bswap32((select << 16) | 0x08 | 0x10);
+	dma.length = __builtin_bswap32(sizeof(cfg));
+	dma.address = __builtin_bswap64((uint64_t)(uintptr_t)&cfg);
+	*(volatile uint64_t *)(0x09020000ULL + 16) = __builtin_bswap64((uint64_t)(uintptr_t)&dma);
+}
+
 /* ------------------------------------------------------------------------ */
 /* Main Loader Entry Point                                                  */
 /* ------------------------------------------------------------------------ */
@@ -320,9 +363,16 @@ felix_baremetal_main(uint64_t fdt_addr)
 {
 	(void)fdt_addr;
 
-	/* 1. Disable AP Watchdog Timers immediately to eliminate resets */
-	*(volatile uint32_t *)0x10060000UL = 0; // Cluster 0 WDT
-	*(volatile uint32_t *)0x10070000UL = 0; // Cluster 1 WDT
+	uint64_t midr = rsr("midr_el1");
+	int qemu = (((midr >> 4) & 0xfff) == 0xd0b);
+
+	if (qemu) {
+		ramfb_init_qemu(FB_OUTER_BASE, FB_W, FB_H, FB_STRIDE);
+	} else {
+		/* 1. Disable AP Watchdog Timers immediately on physical hardware */
+		*(volatile uint32_t *)0x10060000UL = 0; // Cluster 0 WDT
+		*(volatile uint32_t *)0x10070000UL = 0; // Cluster 1 WDT
+	}
 
 	/* 2. Visual Takeover: Dark blue console on Pixel Fold AMOLED */
 	con_clear(0xFF001F3F);
@@ -396,8 +446,6 @@ felix_baremetal_main(uint64_t fdt_addr)
 	/* 5. Build Apple Device Tree */
 	struct dt_writer w = { .base = (uint8_t *)dt_pa, .cur = (uint8_t *)dt_pa, .depth = 0 };
 	uint64_t cntfrq = rsr("cntfrq_el0");
-	uint64_t midr = rsr("midr_el1");
-	int qemu = (((midr >> 4) & 0xfff) == 0xd0b);
 
 	uint64_t io_base = qemu ? 0x08000000ULL : 0x10000000ULL;
 	uint64_t io_size = qemu ? 0x08000000ULL : 0x10000000ULL;

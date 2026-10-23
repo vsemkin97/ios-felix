@@ -10,6 +10,7 @@ qemu-system-aarch64 \
     -smp 1 \
     -m 6G \
     -kernel baremetal_loader/Image \
+    -device ramfb \
     -display cocoa \
     -serial stdio \
     -no-reboot "$@"

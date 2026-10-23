@@ -581,7 +581,12 @@ felix_baremetal_main(uint64_t fdt_addr)
 	for (unsigned i = 0; i < sizeof(seed); i++) seed[i] = (uint8_t)(i * 37 + 0x42);
 
 	dt_begin(&w, "device-tree");
-	dt_identity(&w, identity_root, sizeof(identity_root) / sizeof(identity_root[0]), identity_root_data);
+	static const char root_compat[] = "D22AP\0iPhone10,3\0xiaomi,sweet\0qcom,sm7150\0AppleARM\0";
+	dt_prop(&w, "compatible", root_compat, sizeof(root_compat));
+	dt_prop_str(&w, "model", "iPhone10,3");
+	dt_prop_str(&w, "target-type", "D22");
+	dt_prop_str(&w, "target-sub-type", "D22AP");
+	dt_prop_str(&w, "manufacturer", "Apple Inc.");
 	dt_prop_str(&w, "platform-name", "t8015");
 	dt_prop_padded(&w, "serial-number", "FELIX00PIXELFOLD", 32);
 	dt_prop_padded(&w, "mlb-serial-number", "FELIX00PIXELFOLDMLB", 32);

@@ -746,10 +746,10 @@ static int64_t ufs_scsi_read_once(uint64_t dma_pa, uint8_t lun, uint64_t lba, ui
 	utrd->resp = ((512u / 4) << 16) | (512u / 4);
 
 	uint32_t n = 0;
-	for (uint32_t done = 0; done < len; done += 256 * 1024, n++) {
+	for (uint32_t done = 0; done < len; done += 4096, n++) {
 		uint32_t chunk = len - done;
-		if (chunk > 256 * 1024)
-			chunk = 256 * 1024;
+		if (chunk > 4096)
+			chunk = 4096;
 		ucd->prdt[n].addr_lo = (uint32_t)(bounce_pa + done);
 		ucd->prdt[n].addr_hi = (uint32_t)((bounce_pa + done) >> 32);
 		ucd->prdt[n].rsvd = 0;

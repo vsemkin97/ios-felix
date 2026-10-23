@@ -441,8 +441,36 @@ felix_baremetal_main(uint64_t fdt_addr)
 			seg_copied++;
 		}
 	}
-	/* 4. RAMDisk & Device Tree placement */
-	uint64_t ramdisk_pa = (kern_hi + 0x3ffffULL) & ~0x3ffffULL;
+	/* 4. RDWBLOCK, UFS DMA Buffer, RAMDisk & Device Tree placement */
+	uint64_t rdw_pa = (kern_hi + 0x3ffffULL) & ~0x3ffffULL;
+	uint64_t rdw_size = 0x4000ULL; /* 16 KB page */
+
+	uint64_t ufs_buf_pa = rdw_pa + rdw_size;
+	uint64_t ufs_buf_size = 0x40000ULL; /* 256 KB */
+
+	/* Initialize RDWBLOCK descriptor for bcm2837 redwood_ufs */
+	volatile uint8_t *rdw = (volatile uint8_t *)rdw_pa;
+	for (uint64_t i = 0; i < rdw_size; i++) rdw[i] = 0;
+
+	/* Header */
+	*(volatile uint64_t *)(rdw + 0x00) = 0x4b434f4c42574452ULL; /* 'RDWBLOCK' */
+	*(volatile uint32_t *)(rdw + 0x08) = 3;                      /* version = 3 */
+	*(volatile uint32_t *)(rdw + 0x0c) = 0x2b00;                 /* size = 0x2b00 */
+	*(volatile uint32_t *)(rdw + 0x10) = 1;                      /* 1 partition */
+	*(volatile uint32_t *)(rdw + 0x14) = 256;                    /* buffer_size_kb = 256 */
+	*(volatile uint64_t *)(rdw + 0x18) = ufs_buf_pa;             /* buffer_pa */
+
+	/* Partition 0: 'userdata' at offset 0x180 */
+	volatile uint8_t *part0 = rdw + 0x180;
+	const char *pname = "userdata";
+	for (int i = 0; pname[i]; i++) part0[i] = pname[i];
+	*(volatile uint64_t *)(part0 + 0x20) = 0;                    /* start_lba */
+	*(volatile uint64_t *)(part0 + 0x28) = 0x2000000ULL;         /* 33M blocks (~16GB) */
+	*(volatile uint32_t *)(part0 + 0x30) = 0;                    /* LUN 0 */
+
+	con_hex2("RDWBLOCK", "pa=", (uint32_t)rdw_pa, "buf_pa=", (uint32_t)ufs_buf_pa);
+
+	uint64_t ramdisk_pa = ufs_buf_pa + ufs_buf_size;
 	uint64_t ramdisk_size = 0x100000ULL; /* 1 MB */
 
 	/* Copy launchd binary into the RAMDisk so mockfs mounts it as /sbin/launchd */
@@ -617,10 +645,23 @@ felix_baremetal_main(uint64_t fdt_addr)
 	ba->deviceTreeP = KERNEL_VIRT_BASE + (dt_pa - phys_base); /* EXACT virtual address! */
 	ba->deviceTreeLength = dt_len;
 
-	const char *cmd = qemu ?
-		"-v debug=0x8 serial=3 cpus=1" :
-		"-v debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress wdt=-1 wdt_test=no_user_checkin sweetusb=0 rd=md0 unentitled_ios_sim_launch=1 ignition_level=1 launchd_unsecure_cache=1";
-	memcpy(ba->commandLine, cmd, str_len(cmd) + 1);
+	if (qemu) {
+		const char *qcmd = "-v debug=0x8 serial=3 cpus=1";
+		memcpy(ba->commandLine, qcmd, str_len(qcmd) + 1);
+	} else {
+		/* Format cmd with dynamic ufs_shared_pa physical address */
+		char *dst = ba->commandLine;
+		const char *prefix = "-v debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress wdt=-1 wdt_test=no_user_checkin sweetusb=0 rd=md0 ufs_native=1 unentitled_ios_sim_launch=1 ignition_level=1 launchd_unsecure_cache=1 ufs_shared_pa=0x";
+		while (*prefix) *dst++ = *prefix++;
+		/* Convert rdw_pa to hex string */
+		for (int s = 60; s >= 0; s -= 4) {
+			uint32_t nib = (rdw_pa >> s) & 0xf;
+			if (s == 0 || (rdw_pa >> s) != 0 || dst > ba->commandLine + 200) {
+				*dst++ = "0123456789abcdef"[nib];
+			}
+		}
+		*dst = 0;
+	}
 	con_str("BOOTARGS", ba->commandLine);
 	decon_flush();
 

@@ -50,13 +50,10 @@ void secondary_core_main(void)
 		if (req != 0 && req != last_answered) {
 			uint64_t lba  = *(volatile uint64_t *)(rdw + 0x88);
 			uint64_t cnt  = *(volatile uint64_t *)(rdw + 0x90);
-			uint32_t op   = *(volatile uint32_t *)(rdw + 0x98);
 
 			int64_t status = 0;
 			if (!g_ufs_hardware_ready) {
 				status = (int64_t)0xBAAD000100000000ULL;
-			} else if (op != 0) {
-				status = (int64_t)0xBAAD000200000000ULL;
 			} else if (g_ufs_buf_pa == 0) {
 				status = (int64_t)0xBAAD000300000000ULL;
 			} else {
@@ -66,6 +63,10 @@ void secondary_core_main(void)
 					status = scsi_rc;
 				}
 			}
+
+			/* Flush buffer from Core 1 cache if any, then memory barrier */
+			clean_dcache(g_ufs_buf_pa, g_ufs_buf_pa + cnt * 4096);
+			__asm__ volatile("dmb sy" ::: "memory");
 
 			/* Success: acknowledge request */
 			*(volatile int64_t *)(rdw + 0x108) = status;

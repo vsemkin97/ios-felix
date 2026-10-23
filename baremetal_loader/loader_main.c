@@ -174,19 +174,23 @@ dt_end(struct dt_writer *w)
 }
 
 static void
-nvram_chrp_header(uint8_t *h, uint8_t type, uint32_t size, const char *name)
+nvram_chrp_header(uint8_t *h, uint8_t sig, uint32_t bytes, const char *name)
 {
-	uint32_t sum = 0;
-	h[0] = type;
-	h[1] = 0;
-	h[2] = (uint8_t)(size >> 12);
-	h[3] = (uint8_t)(size >> 4);
-	memset(h + 4, 0, 12);
+	uint16_t blocks = (uint16_t)(bytes / 16), sum;
+
+	memset(h, 0, 16);
+	h[0] = sig;
+	h[2] = (uint8_t)blocks;
+	h[3] = (uint8_t)(blocks >> 8);
 	memcpy(h + 4, name, str_len(name));
-	for (int i = 0; i < 16; i++) {
-		if (i != 1) sum += h[i];
+	/* checksum over signature, length and name, folded to 8 bits */
+	sum = h[0];
+	for (int i = 2; i < 16; i++) {
+		sum += h[i];
 	}
-	while (sum > 0xff) sum = (sum & 0xff) + (sum >> 8);
+	while (sum > 0xff) {
+		sum = (sum & 0xff) + (sum >> 8);
+	}
 	h[1] = (uint8_t)sum;
 }
 
@@ -305,31 +309,7 @@ on_xnu_exception(uint64_t log_pa, uint64_t log_len, uint64_t code,
 	}
 }
 
-static inline uint64_t smc(uint64_t fn, uint64_t a1, uint64_t a2, uint64_t a3)
-{
-	register uint64_t x0 __asm__("x0") = fn;
-	register uint64_t x1 __asm__("x1") = a1;
-	register uint64_t x2 __asm__("x2") = a2;
-	register uint64_t x3 __asm__("x3") = a3;
-	__asm__ volatile("smc #0"
-			 : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3)
-			 :
-			 : "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11",
-			   "x12", "x13", "x14", "x15", "x16", "x17", "memory");
-	return x0;
-}
 
-void
-display_daemon_main(uint64_t cpu_id)
-{
-	(void)cpu_id;
-	for (;;) {
-		*(volatile uint32_t *)0x10060000UL = 0;
-		*(volatile uint32_t *)0x10070000UL = 0;
-		delay_ms(50);
-		decon_flush();
-	}
-}
 
 /* ------------------------------------------------------------------------ */
 /* Main Loader Entry Point                                                  */
@@ -416,8 +396,16 @@ felix_baremetal_main(uint64_t fdt_addr)
 	/* 5. Build Apple Device Tree */
 	struct dt_writer w = { .base = (uint8_t *)dt_pa, .cur = (uint8_t *)dt_pa, .depth = 0 };
 	uint64_t cntfrq = rsr("cntfrq_el0");
+	uint64_t midr = rsr("midr_el1");
+	int qemu = (((midr >> 4) & 0xfff) == 0xd0b);
 
-	uint64_t ranges[3] = { 0, 0x10000000ULL, 0x10000000ULL };
+	uint64_t io_base = qemu ? 0x08000000ULL : 0x10000000ULL;
+	uint64_t io_size = qemu ? 0x08000000ULL : 0x10000000ULL;
+	uint64_t gic_dist = qemu ? 0x08000000ULL : 0x10400000ULL;
+	uint64_t gic_redist = qemu ? 0x080A0000ULL : 0x10440000ULL;
+	uint64_t uart_addr = qemu ? 0x09000000ULL : 0ULL;
+
+	uint64_t ranges[3] = { 0, io_base, io_size };
 	uint8_t seed[64];
 	for (unsigned i = 0; i < sizeof(seed); i++) seed[i] = (uint8_t)(i * 37 + 0x42);
 
@@ -439,7 +427,7 @@ felix_baremetal_main(uint64_t fdt_addr)
 	dt_prop_u32(&w, "debug-enabled", 1);
 	dt_prop_u32(&w, "display-scale", 3);
 	dt_prop_u32(&w, "display-rotation", 0);
-	dt_prop_str(&w, "psci-method", "smc");
+	dt_prop_str(&w, "psci-method", qemu ? "hvc" : "smc");
 
 	static const uint8_t manifest_hash[48] = { 0x66, 0x65, 0x6c, 0x69, 0x78 };
 	static const uint8_t no_behavior[16];
@@ -480,14 +468,15 @@ felix_baremetal_main(uint64_t fdt_addr)
 	dt_begin(&w, "options");
 	dt_end(&w);
 
-	/* 8 CPU cores */
+	/* CPU cores */
 	dt_begin(&w, "cpus");
-	for (int i = 0; i < 8; i++) {
+	for (int i = 0; i < (qemu ? 1 : 8); i++) {
 		char name[5] = { 'c', 'p', 'u', (char)('0' + i), 0 };
 		dt_begin(&w, name);
 		dt_prop_str(&w, "device_type", "cpu");
 		dt_prop_str(&w, "state", i == 0 ? "running" : "waiting");
-		dt_prop_u32(&w, "reg", (uint32_t)(i << 8)); /* Tensor G2 MPIDR: 0x00, 0x100..0x700 */
+		uint32_t reg_val = qemu ? (uint32_t)i : (uint32_t)(i << 8);
+		dt_prop_u32(&w, "reg", reg_val);
 		dt_prop_u32(&w, "cpu-id", (uint32_t)i);
 		dt_prop_u64(&w, "timebase-frequency", cntfrq);
 		dt_prop_u64(&w, "fixed-frequency", cntfrq);
@@ -495,25 +484,35 @@ felix_baremetal_main(uint64_t fdt_addr)
 		dt_prop_u64(&w, "bus-frequency", 100000000ULL);
 		dt_prop_u64(&w, "memory-frequency", 100000000ULL);
 		dt_prop_u64(&w, "peripheral-frequency", 24000000ULL);
-		if (i < 4) dt_prop_u32(&w, "small-core", 1);
+		if (!qemu && i < 4) dt_prop_u32(&w, "small-core", 1);
 		dt_end(&w);
 	}
 	dt_end(&w); /* cpus */
 
 	/* arm-io */
 	dt_begin(&w, "arm-io");
-	dt_prop_str(&w, "device_type", "felix");
+	dt_prop_str(&w, "device_type", qemu ? "qemu-virt" : "felix");
 	dt_prop(&w, "ranges", ranges, sizeof(ranges));
 	dt_prop_u32(&w, "#address-cells", 2);
 	dt_prop_u32(&w, "#size-cells", 2);
 
-	/* GICv3 on Tensor G2: Dist=0x10400000, Redist=0x10440000 */
+	/* GICv3 */
 	dt_begin(&w, "gic");
 	dt_prop_str(&w, "device_type", "interrupt-controller");
 	dt_prop_str(&w, "compatible", "arm,gic-v3");
-	uint64_t gic_reg[4] = { 0x00400000, 0x10000, 0x00440000, 0x100000 };
+	uint64_t gic_reg[4] = { gic_dist - io_base, 0x10000, gic_redist - io_base, 0x100000 };
 	dt_prop(&w, "reg", gic_reg, sizeof(gic_reg));
 	dt_end(&w);
+
+	if (uart_addr != 0) {
+		dt_begin(&w, "uart0");
+		dt_prop_str(&w, "device_type", "uart");
+		dt_prop_str(&w, "compatible", "arm,pl011");
+		uint64_t reg2[2] = { uart_addr - io_base, 0x1000 };
+		dt_prop(&w, "reg", reg2, sizeof(reg2));
+		dt_prop_u32(&w, "boot-console", 1);
+		dt_end(&w);
+	}
 
 	dt_end(&w); /* arm-io */
 	dt_end(&w); /* device-tree */
@@ -549,7 +548,7 @@ felix_baremetal_main(uint64_t fdt_addr)
 	decon_flush();
 
 	/* 7. Patch "XNULDRST" early exception slot */
-	uint64_t target_chkpt = 10; /* Checkpoint 10: First milestone of C execution in _arm_init */
+	uint64_t target_chkpt = 0; /* 0: run full kernel! */
 	uint8_t *p = (uint8_t *)kern_lo;
 	int patched = 0;
 	while (p + 16 <= (uint8_t *)kern_hi) {
@@ -565,125 +564,9 @@ felix_baremetal_main(uint64_t fdt_addr)
 		p += 8;
 	}
 
-	/* 8. Restore common_start at 0xfffffff0074614a8:
-	 * add x0, x20, x22 (0x8b160280)
-	 * sub x0, x0, x23  (0xcb170000)
-	 * ret              (0xd65f03c0)
-	 */
-	*(volatile uint32_t *)(0xfffffff0074614a8ULL + slide) = 0x8b160280;
-	*(volatile uint32_t *)(0xfffffff0074614acULL + slide) = 0xcb170000;
-	*(volatile uint32_t *)(0xfffffff0074614b0ULL + slide) = 0xd65f03c0;
-
-	/* 9. Patch _start_first_cpu at 0xfffffff0074612e4:
-	 * Right after _bootstrap_pagetables is built, map 0x80000000 (loader_return_stub)
-	 * into TTBR0 Page 2 entry 0, then jump directly to common_start.
-	 */
-	volatile uint32_t *map80 = (volatile uint32_t *)(0xfffffff0074612e4ULL + slide);
-	map80[0] = 0xd280c02a; /* mov  x10, #0x601 */
-	map80[1] = 0xf2b0000a; /* movk x10, #0x8000, lsl #16 */
-	map80[2] = 0xf910032a; /* str  x10, [x25, #0x2000] (Page 2[0] = 0x80000601) */
-	map80[3] = 0x1400000d; /* b    common_start (0xfffffff007461324) */
-
-	/* 10. Patch _LowExceptionVectorBase at 0xfffffff00745f7d0:
-	 * NOP out the 4 instructions that disabled MMU while PC was in TTBR1.
-	 * Now exceptions cleanly branch to loader_return_stub at 0x800018a0 with MMU ON.
-	 */
-	volatile uint32_t *exc_patch = (volatile uint32_t *)(0xfffffff00745f7d0ULL + slide);
-	exc_patch[0] = 0xd503201f; /* nop (was mrs x9, SCTLR_EL1) */
-	exc_patch[1] = 0xd503201f; /* nop (was and x9, x9, #~1) */
-	exc_patch[2] = 0xd503201f; /* nop (was msr SCTLR_EL1, x9) */
-	exc_patch[3] = 0xd503201f; /* nop (was isb) */
-
-	/* 11. Patch _loader_jump at 0xfffffff007472a6c:
-	 * Replace "bl _PE_parse_boot_argn" with "mov w0, #0" so early checkpoints
-	 * do not crash on NULL PE_state.bootArgs before PE_init_platform runs.
-	 */
-	*(volatile uint32_t *)(0xfffffff007472a6cULL + slide) = 0x52800000; /* mov w0, #0 */
-
-	/* 12. Fix GIC quiesce and shutdown: do not dereference NULL TPIDR_EL1 */
-	*(volatile uint32_t *)(0xfffffff00747464cULL + slide) = 0xd65f03c0; /* ret for _gic_v3_irq_quiesce */
-	*(volatile uint32_t *)(0xfffffff0074746d8ULL + slide) = 0xd65f03c0; /* ret for _gic_v3_irq_cpu_shutdown */
-
-	/* 13. Fix _cpu_number at 0xfffffff007451d40: return 0 if TPIDR_EL1 is NULL */
-	volatile uint32_t *cpu_num = (volatile uint32_t *)(0xfffffff007451d40ULL + slide);
-	cpu_num[0] = 0xd538d080; /* mrs   x0, TPIDR_EL1 */
-	cpu_num[1] = 0xb40000a0; /* cbz   x0, +20 (0x18) */
-	cpu_num[2] = 0xf940e408; /* ldr   x8, [x0, #0x1c8] */
-	cpu_num[3] = 0xb4000068; /* cbz   x8, +12 (0x18) */
-	cpu_num[4] = 0x79c00100; /* ldrsh w0, [x8] */
-	cpu_num[5] = 0xd65f03c0; /* ret */
-	cpu_num[6] = 0x52800000; /* mov   w0, #0 */
-	cpu_num[7] = 0xd65f03c0; /* ret */
-
-	/* 14. Fix _current_percpu_base at 0xfffffff00745191c: return 0 if TPIDR_EL1 is NULL */
-	volatile uint32_t *percpu = (volatile uint32_t *)(0xfffffff00745191cULL + slide);
-	percpu[0] = 0xd538d080; /* mrs x0, TPIDR_EL1 */
-	percpu[1] = 0xb4000060; /* cbz x0, +12 (0x10) */
-	percpu[2] = 0xf940e000; /* ldr x0, [x0, #0x1c0] */
-	percpu[3] = 0xd65f03c0; /* ret */
-	percpu[4] = 0xd2800000; /* mov x0, #0 */
-	percpu[5] = 0xd65f03c0; /* ret */
-
-	/* 15. Setup dynamic branch instructions to loader_return_stub (0x800018a0) */
-	uint64_t stub_addr = (uint64_t)&loader_return_stub;
-	uint32_t lo16 = (uint32_t)(stub_addr & 0xffff);
-	uint32_t mid16 = (uint32_t)((stub_addr >> 16) & 0xffff);
-	uint32_t mov_lo = 0xd2800009u | (lo16 << 5);             /* mov  x9, #lo16 */
-	uint32_t mov_mid = 0xf2800009u | (mid16 << 5) | (1u << 21); /* movk x9, #mid16, lsl #16 */
-	uint32_t br_x9 = 0xd61f0120u;                             /* br   x9 */
-
-	/* 16. Hook _panic at 0xfffffff007acce1c to report to loader_return_stub */
-	volatile uint32_t *p_panic = (volatile uint32_t *)(0xfffffff007acce1cULL + slide);
-	p_panic[0] = 0xaa0003e3; /* mov  x3, x0 (format string VA) */
-	p_panic[1] = 0xaa1e03e4; /* mov  x4, x30 (caller PC) */
-	p_panic[2] = 0xd2800022; /* mov  x2, #1 (reason = panic) */
-	p_panic[3] = 0xaa1e03e6; /* mov  x6, x30 */
-	p_panic[4] = 0x910003e7; /* mov  x7, sp */
-	p_panic[5] = 0xd2800000; /* mov  x0, #0 */
-	p_panic[6] = 0xd2800001; /* mov  x1, #0 */
-	p_panic[7] = mov_lo;
-	p_panic[8] = mov_mid;
-	p_panic[9] = br_x9;
-
-	/* 17. Hook _ExceptionVectorsBase (slots 0, 3, 4, 7) to catch any early fault */
-	uint32_t exc_hook[11] = {
-		0xd5385203, /* mrs  x3, ESR_EL1 */
-		0xd5384024, /* mrs  x4, ELR_EL1 */
-		0xd5386005, /* mrs  x5, FAR_EL1 */
-		0xaa1e03e6, /* mov  x6, lr */
-		0x910003e7, /* mov  x7, sp */
-		0xd2800022, /* mov  x2, #1 */
-		0xd2800000, /* mov  x0, #0 */
-		0xd2800001, /* mov  x1, #0 */
-		mov_lo,
-		mov_mid,
-		br_x9
-	};
-	volatile uint8_t *vbase = (volatile uint8_t *)(0xfffffff00745a000ULL + slide);
-	const uint32_t slots[] = { 0x000, 0x180, 0x200, 0x380 };
-	for (int s = 0; s < 4; s++) {
-		volatile uint32_t *target = (volatile uint32_t *)(vbase + slots[s]);
-		for (int i = 0; i < 11; i++) target[i] = exc_hook[i];
-	}
-
-	/* 18. Pre-initialize PE_state.bootArgs pointer and loader_l1/l2 tables */
-	uint64_t ba_va = KERNEL_VIRT_BASE + (ba_pa - phys_base);
-	*(volatile uint64_t *)(0xfffffff007252900ULL + slide) = ba_va;
-
-	uint64_t loader_l2_pa = 0xfffffff007e7c000ULL + slide;
-	uint64_t *l1 = (uint64_t *)(0xfffffff007e7d000ULL + slide);
-	uint64_t *l2 = (uint64_t *)(0xfffffff007e7c000ULL + slide);
-	l1[2] = loader_l2_pa | 0x3;
-	l2[0] = 0x80000000ULL | 0x601;
-
 	con_hex2("STUB", "patched=", patched, "chkpt=", (uint32_t)target_chkpt);
 	con_hex("ENTRY", entry_pa);
 	con_str("READY", "Jumping to XNU kernel in 2s...");
-
-	/* Start Core 1 as background display refresh daemon (20 FPS DECON flush) */
-	extern void secondary_entry(void) __attribute__((visibility("hidden")));
-	uint64_t psci_ret = smc(0xc4000003UL, 1 << 8, (uintptr_t)secondary_entry, 1);
-	con_hex2("CORE 1", "psci=", (uint32_t)psci_ret, "mpidr=", 0x100);
 
 	/* Clean caches across the entire loaded region */
 	clean_dcache(kern_lo, top);

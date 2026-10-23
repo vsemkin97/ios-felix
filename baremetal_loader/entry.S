@@ -201,23 +201,3 @@ loader_return_stub:
 	mov	sp, x9
 	b	on_xnu_exception
 
-/*
- * PSCI CPU_ON target: Core 1 display refresh daemon.
- * x0 = context id = cpu index (1..7).
- */
-	.globl secondary_entry
-secondary_entry:
-	msr	daifset, #0xf
-	msr	spsel, #1
-	adrp	x1, _sec_stacks
-	add	x1, x1, :lo12:_sec_stacks
-	add	x1, x1, x0, lsl #12
-	add	x1, x1, #0x1000
-	mov	sp, x1
-	adrp	x1, vectors
-	add	x1, x1, :lo12:vectors
-	msr	vbar_el1, x1
-	isb
-	bl	display_daemon_main
-1:	wfe
-	b	1b

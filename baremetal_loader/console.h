@@ -31,10 +31,10 @@ void uart_putc(char c);
 void *memset(void *s, int c, unsigned long n);
 void *memcpy(void *dst, const void *src, unsigned long n);
 
-static inline uint64_t get_cntpct(void)
+static inline uint64_t get_cntvct(void)
 {
 	uint64_t v;
-	__asm__ volatile("isb; mrs %0, cntpct_el0" : "=r"(v));
+	__asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(v));
 	return v;
 }
 
@@ -50,8 +50,8 @@ static inline void delay_ms(unsigned ms)
 	uint64_t frq = get_cntfrq();
 	if (frq < 1000000ULL || frq > 100000000ULL)
 		frq = 24576000ULL;
-	uint64_t end = get_cntpct() + (frq / 1000) * ms;
-	while (get_cntpct() < end) {
+	uint64_t end = get_cntvct() + (frq / 1000) * ms;
+	while (get_cntvct() < end) {
 		__asm__ volatile("yield");
 	}
 }

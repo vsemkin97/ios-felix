@@ -46,8 +46,22 @@ static void bldr_putc(char c)
 	*head_ptr = head + 1;
 }
 
+static inline int is_qemu(void)
+{
+	uint64_t midr;
+	__asm__ volatile("mrs %0, midr_el1" : "=r"(midr));
+	return ((midr >> 4) & 0xfff) == 0xd0b;
+}
+
 void uart_putc(char c)
 {
+	if (is_qemu()) {
+		*(volatile uint32_t *)0x09000000UL = (uint32_t)(uint8_t)c;
+		return;
+	}
+
+	*(volatile uint32_t *)0x10A00020UL = (uint32_t)(uint8_t)c;
+
 	if (!ramoops_inited)
 		ramoops_init();
 
@@ -94,6 +108,8 @@ void *memcpy(void *dst, const void *src, unsigned long n)
 
 void decon_flush(void)
 {
+	if (is_qemu()) return;
+
 	__asm__ volatile("dsb sy" ::: "memory");
 
 	/* Clean & invalidate both framebuffers to PoC so DPU DMA reads fresh DRAM pixels */
@@ -133,8 +149,8 @@ void decon_flush(void)
 	/* 5. Wait for DECON hardware to complete update (UPDATE_REQ becomes 0) */
 	uint64_t frq = get_cntfrq();
 	if (frq < 1000000ULL || frq > 100000000ULL) frq = 19200000ULL;
-	uint64_t end = get_cntpct() + (frq / 20); // 50 ms
-	while (get_cntpct() < end) {
+	uint64_t end = get_cntvct() + (frq / 20); // 50 ms
+	while (get_cntvct() < end) {
 		if (decon1[0x50 / 4] == 0)
 			break;
 		__asm__ volatile("yield");
@@ -148,8 +164,8 @@ void decon_flush(void)
 	if (decon1[0x50 / 4] != 0) {
 		decon1[0x30 / 4] = (decon1[0x30 / 4] & ~0x103) | 0x1;
 		decon0[0x30 / 4] = (decon0[0x30 / 4] & ~0x103) | 0x1;
-		end = get_cntpct() + (frq / 20);
-		while (get_cntpct() < end) {
+		end = get_cntvct() + (frq / 20);
+		while (get_cntvct() < end) {
 			if (decon1[0x50 / 4] == 0)
 				break;
 			__asm__ volatile("yield");
@@ -165,13 +181,6 @@ void con_clear(uint32_t bg)
 {
 	con_fb = (volatile uint32_t *)0xfc000000UL;
 	uint64_t bg64 = ((uint64_t)bg << 32) | (uint64_t)bg;
-	uint32_t dpp2_fb = *(volatile uint32_t *)0x1C0B2040UL;
-
-	if (dpp2_fb >= 0x80000000UL && dpp2_fb != 0xfc000000UL) {
-		volatile uint64_t *fb = (volatile uint64_t *)(uintptr_t)dpp2_fb;
-		for (uint32_t i = 0; i < (1080 * 2092) / 2; i++)
-			fb[i] = bg64;
-	}
 
 	/* Outer screen: 1080 * 2092 = 2,259,360 pixels */
 	volatile uint64_t *fb_out = (volatile uint64_t *)0xfc000000UL;
@@ -195,7 +204,7 @@ static void put_char(int col, char ch, uint32_t fg)
 	int x0 = MARGIN + col * CH_W, y0 = MARGIN + row * CH_H;
 	if (x0 + CH_W > (int)con_w || y0 + CH_H > (int)con_h)
 		return;
-	uint32_t dpp2_fb = *(volatile uint32_t *)0x1C0B2040UL;
+
 	for (int gy = 0; gy < 16; gy++)
 		for (int gx = 0; gx < 8; gx++) {
 			uint32_t c = (g[gy] & (0x80 >> gx)) ? fg : con_bg;
@@ -207,12 +216,6 @@ static void put_char(int col, char ch, uint32_t fg)
 				for (int sx = 0; sx < SCALE; sx++) {
 					p_out[sx] = c;
 					p_in[sx] = c;
-				}
-				if (dpp2_fb >= 0x80000000UL && dpp2_fb != 0xfc000000UL) {
-					volatile uint32_t *p_dpp = (volatile uint32_t *)(uintptr_t)dpp2_fb
-						+ (y0 + gy * SCALE + sy) * 1080 + x0 + gx * SCALE;
-					for (int sx = 0; sx < SCALE; sx++)
-						p_dpp[sx] = c;
 				}
 			}
 		}

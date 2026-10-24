@@ -82,6 +82,21 @@ ln -sfn private/etc "${MOUNT_POINT}/etc"
 ln -sfn private/var "${MOUNT_POINT}/var"
 ln -sfn private/var/tmp "${MOUNT_POINT}/tmp"
 
+# Filesystem mount helpers required by /sbin/mount
+mkdir -p "${MOUNT_POINT}/sbin"
+mkdir -p "${MOUNT_POINT}/Library/Filesystems/hfs.fs/Contents/Resources"
+mkdir -p "${MOUNT_POINT}/System/Library/Filesystems/hfs.fs/Contents/Resources"
+mkdir -p "${MOUNT_POINT}/Library/Filesystems/apfs.fs/Contents/Resources"
+mkdir -p "${MOUNT_POINT}/System/Library/Filesystems/apfs.fs/Contents/Resources"
+
+ln -sf /System/Library/Filesystems/hfs.fs/mount_hfs "${MOUNT_POINT}/sbin/mount_hfs"
+ln -sf /System/Library/Filesystems/hfs.fs/mount_hfs "${MOUNT_POINT}/Library/Filesystems/hfs.fs/Contents/Resources/mount_hfs"
+ln -sf /System/Library/Filesystems/hfs.fs/mount_hfs "${MOUNT_POINT}/System/Library/Filesystems/hfs.fs/Contents/Resources/mount_hfs"
+
+ln -sf /System/Library/Filesystems/apfs.fs/mount_apfs "${MOUNT_POINT}/sbin/mount_apfs"
+ln -sf /System/Library/Filesystems/apfs.fs/mount_apfs "${MOUNT_POINT}/Library/Filesystems/apfs.fs/Contents/Resources/mount_apfs"
+ln -sf /System/Library/Filesystems/apfs.fs/mount_apfs "${MOUNT_POINT}/System/Library/Filesystems/apfs.fs/Contents/Resources/mount_apfs"
+
 echo "[*] [5/8] Creating /private/var hierarchy from var.skel..."
 python3 - <<EOF
 import os

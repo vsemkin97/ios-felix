@@ -46,28 +46,41 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "[*] [2/8] Cleaning previous rootfs contents..."
-rm -rf "${MOUNT_POINT}/"* "${MOUNT_POINT}/".[!.]* 2>/dev/null || true
+if [ ! -d "${MOUNT_POINT}/System/Library" ] || [ ! -d "${MOUNT_POINT}/System/Cryptexes/OS" ]; then
+    echo "[*] [2/8] Cleaning previous rootfs contents..."
+    rm -rf "${MOUNT_POINT}/"* "${MOUNT_POINT}/".[!.]* 2>/dev/null || true
 
-echo "[*] [3/8] Copying clean iOS 16.5 rootfs (2.9 GB)..."
-cp -a "${IOS165_DIR}/rootfs/"* "${MOUNT_POINT}/"
+    echo "[*] [3/8] Copying clean iOS 16.5 rootfs (2.9 GB)..."
+    cp -a "${IOS165_DIR}/rootfs/"* "${MOUNT_POINT}/"
 
-echo "[*] [4/8] Installing Cryptexes & dyld shared cache (2.5 GB)..."
-mkdir -p "${MOUNT_POINT}/System/Cryptexes/OS" "${MOUNT_POINT}/System/Cryptexes/App"
-cp -a "${IOS165_DIR}/cryptex/"* "${MOUNT_POINT}/System/Cryptexes/OS/"
-cp -a "${IOS165_DIR}/cryptex-app/"* "${MOUNT_POINT}/System/Cryptexes/App/"
+    echo "[*] [4/8] Installing Cryptexes & dyld shared cache (2.5 GB)..."
+    mkdir -p "${MOUNT_POINT}/System/Cryptexes/OS" "${MOUNT_POINT}/System/Cryptexes/App"
+    cp -a "${IOS165_DIR}/cryptex/"* "${MOUNT_POINT}/System/Cryptexes/OS/"
+    cp -a "${IOS165_DIR}/cryptex-app/"* "${MOUNT_POINT}/System/Cryptexes/App/"
 
-DYLD_CACHE_DIR="${MOUNT_POINT}/System/Cryptexes/OS/System/Library/Caches/com.apple.dyld"
-mkdir -p "${DYLD_CACHE_DIR}"
-cp -a "${IOS165_DIR}/20F66__iPhone10,3_6/"* "${DYLD_CACHE_DIR}/"
+    DYLD_CACHE_DIR="${MOUNT_POINT}/System/Cryptexes/OS/System/Library/Caches/com.apple.dyld"
+    mkdir -p "${DYLD_CACHE_DIR}"
+    cp -a "${IOS165_DIR}/20F66__iPhone10,3_6/"* "${DYLD_CACHE_DIR}/"
 
-# Move staged system apps to Applications if present
-if [ -d "${MOUNT_POINT}/private/var/staged_system_apps" ]; then
-    echo "[*] Moving staged system applications to /Applications..."
-    mkdir -p "${MOUNT_POINT}/Applications"
-    mv "${MOUNT_POINT}/private/var/staged_system_apps/"* "${MOUNT_POINT}/Applications/" 2>/dev/null || true
-    rm -rf "${MOUNT_POINT}/private/var/staged_system_apps"
+    # Move staged system apps to Applications if present
+    if [ -d "${MOUNT_POINT}/private/var/staged_system_apps" ]; then
+        echo "[*] Moving staged system applications to /Applications..."
+        mkdir -p "${MOUNT_POINT}/Applications"
+        mv "${MOUNT_POINT}/private/var/staged_system_apps/"* "${MOUNT_POINT}/Applications/" 2>/dev/null || true
+        rm -rf "${MOUNT_POINT}/private/var/staged_system_apps"
+    fi
+else
+    echo "[*] Rootfs and cryptexes already extracted on image, keeping base files..."
 fi
+
+echo "[*] Creating essential root mountpoints and symlinks from system.manifest..."
+mkdir -p "${MOUNT_POINT}/dev" "${MOUNT_POINT}/cores" "${MOUNT_POINT}/Developer"
+mkdir -p "${MOUNT_POINT}/private/tmp" "${MOUNT_POINT}/private/var/tmp" "${MOUNT_POINT}/private/preboot"
+chmod 555 "${MOUNT_POINT}/dev" 2>/dev/null || true
+chmod 775 "${MOUNT_POINT}/cores" "${MOUNT_POINT}/Developer" 2>/dev/null || true
+ln -sfn private/etc "${MOUNT_POINT}/etc"
+ln -sfn private/var "${MOUNT_POINT}/var"
+ln -sfn private/var/tmp "${MOUNT_POINT}/tmp"
 
 echo "[*] [5/8] Creating /private/var hierarchy from var.skel..."
 python3 - <<EOF

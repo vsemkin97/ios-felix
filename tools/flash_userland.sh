@@ -3,7 +3,8 @@
 # flash_userland.sh - Automated iOS Userland Patching & Flashing for Pixel Fold
 # ==============================================================================
 # This script mounts a raw HFS+ iOS rootfs image, applies all required patches
-# (libredwood dylib injections, disabled crash daemons, SetupDone preferences),
+# (universal libredwood-sb injection, stubbed mobileactivationd, disabled
+# crash daemons, build 20H392 migration records, SetupDone preferences),
 # converts the raw image into an Android sparse image (.simg), and flashes it
 # directly to the physical UFS 'userdata' partition via fastboot.
 # ==============================================================================
@@ -52,17 +53,27 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "[*] [2/6] Injecting redwood dylibs into /usr/lib/..."
+echo "[*] [2/6] Injecting universal libredwood dylibs into /usr/lib/..."
 mkdir -p "${MOUNT_POINT}/usr/lib"
 cp -v "${SCRIPT_DIR}/userland_patches/lib/libredwood-sb.dylib" "${MOUNT_POINT}/usr/lib/"
 cp -v "${SCRIPT_DIR}/userland_patches/lib/libredwood.dylib" "${MOUNT_POINT}/usr/lib/"
 chmod 755 "${MOUNT_POINT}/usr/lib/libredwood-sb.dylib" "${MOUNT_POINT}/usr/lib/libredwood.dylib"
 
-echo "[*] [3/6] Patching LaunchDaemons (SpringBoard, backboardd, mobileactivationd)..."
+echo "[*] [3/6] Neutralizing mobileactivationd & watchdogd crash loops..."
+# Replace /usr/libexec/mobileactivationd binary with exit(0) stub
+if [ -f "${MOUNT_POINT}/usr/libexec/mobileactivationd" ]; then
+    if [ ! -f "${MOUNT_POINT}/usr/libexec/mobileactivationd.orig" ]; then
+        cp -v "${MOUNT_POINT}/usr/libexec/mobileactivationd" "${MOUNT_POINT}/usr/libexec/mobileactivationd.orig"
+    fi
+    cp -v "${SCRIPT_DIR}/userland_patches/lib/stub_exit" "${MOUNT_POINT}/usr/libexec/mobileactivationd"
+    chmod 755 "${MOUNT_POINT}/usr/libexec/mobileactivationd"
+    echo "    [+] Replaced /usr/libexec/mobileactivationd with non-crashing exit(0) stub"
+fi
+
 python3 - <<EOF
 import plistlib
 import os
-import sys
+import shutil
 
 base = "${MOUNT_POINT}"
 
@@ -90,24 +101,30 @@ if os.path.exists(bb_path):
         plistlib.dump(bb, f, fmt=plistlib.FMT_XML)
     print("    [+] Patched com.apple.backboardd.plist (DYLD_INSERT_LIBRARIES)")
 
-# 3. Disable crashing daemons lacking Apple SEP / Baseband
+# 3. Disable and unregister crashing daemons
 for daemon in ["com.apple.mobileactivationd.plist", "com.apple.watchdogd.plist"]:
     d_path = os.path.join(base, "System/Library/LaunchDaemons", daemon)
     if os.path.exists(d_path):
         with open(d_path, 'rb') as f:
             d = plistlib.load(f)
         d['Disabled'] = True
+        d.pop('MachServices', None)
+        d.pop('LaunchEvents', None)
         with open(d_path, 'wb') as f:
             plistlib.dump(d, f, fmt=plistlib.FMT_XML)
-        print(f"    [+] Disabled {daemon}")
+        disabled_path = d_path + ".disabled"
+        shutil.move(d_path, disabled_path)
+        print(f"    [+] Stripped MachServices and disabled {daemon}")
 EOF
 
-echo "[*] [4/6] Installing SetupDone and migration preferences into /private/var/mobile/..."
+echo "[*] [4/6] Installing SetupDone and build 20H392 migration preferences..."
 PREF_DIR="${MOUNT_POINT}/private/var/mobile/Library/Preferences"
-mkdir -p "${PREF_DIR}"
+ROOT_PREF_DIR="${MOUNT_POINT}/private/var/root/Library/Preferences"
+mkdir -p "${PREF_DIR}" "${ROOT_PREF_DIR}"
 cp -v "${SCRIPT_DIR}/userland_patches/preferences/"*.plist "${PREF_DIR}/"
+cp -v "${SCRIPT_DIR}/userland_patches/preferences/com.apple.migration.plist" "${ROOT_PREF_DIR}/"
 chown -R 501:501 "${PREF_DIR}"
-chmod 644 "${PREF_DIR}"/*.plist
+chmod 644 "${PREF_DIR}"/*.plist "${ROOT_PREF_DIR}"/*.plist
 
 echo "[*] [5/6] Flushing writes and detaching disk image..."
 sync

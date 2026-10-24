@@ -59,32 +59,27 @@ cp -v "${SCRIPT_DIR}/userland_patches/lib/libredwood-sb.dylib" "${MOUNT_POINT}/u
 cp -v "${SCRIPT_DIR}/userland_patches/lib/libredwood.dylib" "${MOUNT_POINT}/usr/lib/"
 chmod 755 "${MOUNT_POINT}/usr/lib/libredwood-sb.dylib" "${MOUNT_POINT}/usr/lib/libredwood.dylib"
 
-echo "[*] [3/6] Applying upstream hackios launchd architecture..."
-# 1. Disable /System/Library/xpc/launchd.plist
-# Crucial discovery: launchd.plist is Apple's embedded catalog of ~523 jobs.
-# If launchd.plist exists, launchd loads all 523 jobs and completely ignores LaunchDaemons!
-if [ -f "${MOUNT_POINT}/System/Library/xpc/launchd.plist" ]; then
-    echo "    [+] Disabling /System/Library/xpc/launchd.plist (forces launchd to read LaunchDaemons/)..."
-    mv -v "${MOUNT_POINT}/System/Library/xpc/launchd.plist" "${MOUNT_POINT}/System/Library/xpc/launchd.plist.disabled"
+echo "[*] [3/6] Applying filtered launchd.plist & pruned LaunchDaemons..."
+# Restore NanoLaunchDaemons / LaunchAngels if disabled
+if [ -d "${MOUNT_POINT}/System/Library/NanoLaunchDaemons.disabled" ]; then
+    mv -v "${MOUNT_POINT}/System/Library/NanoLaunchDaemons.disabled" "${MOUNT_POINT}/System/Library/NanoLaunchDaemons"
+fi
+if [ -d "${MOUNT_POINT}/System/Library/LaunchAngels.disabled" ]; then
+    mv -v "${MOUNT_POINT}/System/Library/LaunchAngels.disabled" "${MOUNT_POINT}/System/Library/LaunchAngels"
 fi
 
-# 2. Disable NanoLaunchDaemons and LaunchAngels
-if [ -d "${MOUNT_POINT}/System/Library/NanoLaunchDaemons" ]; then
-    echo "    [+] Disabling /System/Library/NanoLaunchDaemons..."
-    mv -v "${MOUNT_POINT}/System/Library/NanoLaunchDaemons" "${MOUNT_POINT}/System/Library/NanoLaunchDaemons.disabled"
-fi
-if [ -d "${MOUNT_POINT}/System/Library/LaunchAngels" ]; then
-    echo "    [+] Disabling /System/Library/LaunchAngels..."
-    mv -v "${MOUNT_POINT}/System/Library/LaunchAngels" "${MOUNT_POINT}/System/Library/LaunchAngels.disabled"
-fi
-
-# 3. Clean and prune LaunchDaemons to only essential IOS_JOBS
+# 1. Update /System/Library/xpc/launchd.plist
+# Crucial discovery: launchd_cache_loader requires launchd.plist to exist, otherwise it aborts and panics.
+# Because boot-args has launchd_unsecure_cache=1, it parses launchd.plist without signature checks.
+# By filtering its LaunchDaemons catalog to only our 21 essential jobs, launchd_cache_loader succeeds
+# AND loads ONLY the 21 essential jobs into launchd's runtime cache!
 python3 - <<EOF
 import plistlib
 import os
 import shutil
 
 base = "${MOUNT_POINT}"
+xpc_dir = os.path.join(base, "System/Library/xpc")
 ld_dir = os.path.join(base, "System/Library/LaunchDaemons")
 backup_dir = os.path.join(base, "System/Library/LaunchDaemons.stock_disabled")
 os.makedirs(backup_dir, exist_ok=True)
@@ -114,7 +109,45 @@ essential_jobs = {
     "com.apple.SpringBoard.plist",
 }
 
-# Restore any essential plists that might have been moved to backup or disabled
+# 1. Filter /System/Library/xpc/launchd.plist
+plist_orig = os.path.join(xpc_dir, "launchd.plist.orig")
+plist_path = os.path.join(xpc_dir, "launchd.plist")
+plist_disabled = os.path.join(xpc_dir, "launchd.plist.disabled")
+
+if os.path.exists(plist_disabled) and not os.path.exists(plist_orig):
+    shutil.copyfile(plist_disabled, plist_orig)
+elif os.path.exists(plist_path) and not os.path.exists(plist_orig):
+    shutil.copyfile(plist_path, plist_orig)
+
+source_plist = plist_orig if os.path.exists(plist_orig) else (plist_disabled if os.path.exists(plist_disabled) else plist_path)
+
+with open(source_plist, 'rb') as f:
+    catalog = plistlib.load(f)
+
+filtered_lds = {}
+for k, v in catalog.get('LaunchDaemons', {}).items():
+    basename = os.path.basename(k)
+    if basename in essential_jobs:
+        v['StandardErrorPath'] = '/dev/console'
+        v['StandardOutPath'] = '/dev/console'
+        v.pop('_LimitLoadToDeviceTree', None)
+        if basename == 'com.apple.SpringBoard.plist':
+            v.setdefault('EnvironmentVariables', {})['DYLD_INSERT_LIBRARIES'] = '/usr/lib/libredwood-sb.dylib'
+        elif basename == 'com.apple.backboardd.plist':
+            v.setdefault('EnvironmentVariables', {})['DYLD_INSERT_LIBRARIES'] = '/usr/lib/libredwood.dylib'
+        filtered_lds[k] = v
+
+catalog['LaunchDaemons'] = filtered_lds
+
+with open(plist_path, 'wb') as f:
+    plistlib.dump(catalog, f, fmt=plistlib.FMT_BINARY)
+print(f"    [+] Updated {plist_path} (filtered to {len(filtered_lds)} jobs, binary format)")
+
+# Clean up disabled file if exists
+if os.path.exists(plist_disabled) and os.path.exists(plist_path):
+    os.remove(plist_disabled)
+
+# 2. Synchronize /System/Library/LaunchDaemons on disk
 for d in [ld_dir, backup_dir]:
     if os.path.isdir(d):
         for f in os.listdir(d):
@@ -125,7 +158,6 @@ for d in [ld_dir, backup_dir]:
                 if src_path != dst_path:
                     shutil.move(src_path, dst_path)
 
-# Move all non-essential plists to backup_dir
 kept = []
 stashed = 0
 for f in os.listdir(ld_dir):
@@ -137,7 +169,7 @@ for f in os.listdir(ld_dir):
         shutil.move(os.path.join(ld_dir, f), os.path.join(backup_dir, f))
         stashed += 1
 
-print(f"    [+] Kept {len(kept)} essential launchd jobs in LaunchDaemons.")
+print(f"    [+] Kept {len(kept)} essential launchd jobs in LaunchDaemons on disk.")
 print(f"    [+] Stashed {stashed} non-essential background daemons to LaunchDaemons.stock_disabled.")
 
 # Configure the kept essential jobs
@@ -147,20 +179,14 @@ for f in kept:
         with open(p, 'rb') as fp:
             job = plistlib.load(fp)
         
-        # Route standard streams to /dev/console
         job['StandardErrorPath'] = '/dev/console'
         job['StandardOutPath'] = '/dev/console'
         job.pop('_LimitLoadToDeviceTree', None)
         
-        # SpringBoard injection
         if f == "com.apple.SpringBoard.plist":
             job.setdefault('EnvironmentVariables', {})['DYLD_INSERT_LIBRARIES'] = '/usr/lib/libredwood-sb.dylib'
-            print("    [+] Patched com.apple.SpringBoard.plist (DYLD_INSERT_LIBRARIES -> libredwood-sb.dylib)")
-            
-        # backboardd injection
-        if f == "com.apple.backboardd.plist":
+        elif f == "com.apple.backboardd.plist":
             job.setdefault('EnvironmentVariables', {})['DYLD_INSERT_LIBRARIES'] = '/usr/lib/libredwood.dylib'
-            print("    [+] Patched com.apple.backboardd.plist (DYLD_INSERT_LIBRARIES -> libredwood.dylib)")
             
         with open(p, 'wb') as fp:
             plistlib.dump(job, fp, fmt=plistlib.FMT_XML)

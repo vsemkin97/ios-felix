@@ -597,7 +597,7 @@ felix_baremetal_main(uint64_t fdt_addr)
 	dt_prop_u32(&w, "#size-cells", 2);
 
 	const char *cmd = qemu ? "-v debug=0x8 serial=3 cpus=1" :
-		"-v debug=0xc serial=3 cpus=1 keepsyms=1 wdt=-1 wdt_test=no_user_checkin sweetusb=0 sweetlog=0 rd=ufsroot0 ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 launchd_unsecure_cache=1 sweetfb_native=1";
+		"-v debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam wdt=-1 wdt_test=no_user_checkin sweetusb=0 sweetlog=0 rd=ufsroot0 ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 launchd_unsecure_cache=1 sweetfb_native=1";
 
 	dt_begin(&w, "chosen");
 	dt_prop_str(&w, "boot-args", cmd);

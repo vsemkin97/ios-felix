@@ -60,14 +60,17 @@ cp -v "${SCRIPT_DIR}/userland_patches/lib/libredwood.dylib" "${MOUNT_POINT}/usr/
 chmod 755 "${MOUNT_POINT}/usr/lib/libredwood-sb.dylib" "${MOUNT_POINT}/usr/lib/libredwood.dylib"
 
 echo "[*] [3/6] Neutralizing mobileactivationd & watchdogd crash loops..."
-# Replace /usr/libexec/mobileactivationd binary with exit(0) stub
-if [ -f "${MOUNT_POINT}/usr/libexec/mobileactivationd" ]; then
-    if [ ! -f "${MOUNT_POINT}/usr/libexec/mobileactivationd.orig" ]; then
-        cp -v "${MOUNT_POINT}/usr/libexec/mobileactivationd" "${MOUNT_POINT}/usr/libexec/mobileactivationd.orig"
-    fi
-    cp -v "${SCRIPT_DIR}/userland_patches/lib/stub_exit" "${MOUNT_POINT}/usr/libexec/mobileactivationd"
+# Replace /usr/libexec/mobileactivationd binary with genuine Apple binary patched to return 0 in main()
+if [ -f "${SCRIPT_DIR}/userland_patches/bin/mobileactivationd" ]; then
+    cp -v "${SCRIPT_DIR}/userland_patches/bin/mobileactivationd" "${MOUNT_POINT}/usr/libexec/mobileactivationd"
     chmod 755 "${MOUNT_POINT}/usr/libexec/mobileactivationd"
-    echo "    [+] Replaced /usr/libexec/mobileactivationd with non-crashing exit(0) stub"
+    echo "    [+] Installed authentic Apple platform binary mobileactivationd (stubbed main -> exit 0)"
+fi
+
+# Restore plist if it was previously moved to .disabled
+if [ -f "${MOUNT_POINT}/System/Library/LaunchDaemons/com.apple.mobileactivationd.plist.disabled" ]; then
+    mv -v "${MOUNT_POINT}/System/Library/LaunchDaemons/com.apple.mobileactivationd.plist.disabled" \
+          "${MOUNT_POINT}/System/Library/LaunchDaemons/com.apple.mobileactivationd.plist"
 fi
 
 python3 - <<EOF

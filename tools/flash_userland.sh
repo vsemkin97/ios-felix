@@ -59,65 +59,113 @@ cp -v "${SCRIPT_DIR}/userland_patches/lib/libredwood-sb.dylib" "${MOUNT_POINT}/u
 cp -v "${SCRIPT_DIR}/userland_patches/lib/libredwood.dylib" "${MOUNT_POINT}/usr/lib/"
 chmod 755 "${MOUNT_POINT}/usr/lib/libredwood-sb.dylib" "${MOUNT_POINT}/usr/lib/libredwood.dylib"
 
-echo "[*] [3/6] Neutralizing mobileactivationd & watchdogd crash loops..."
-# Replace /usr/libexec/mobileactivationd binary with genuine Apple binary patched to return 0 in main()
-if [ -f "${SCRIPT_DIR}/userland_patches/bin/mobileactivationd" ]; then
-    cp -v "${SCRIPT_DIR}/userland_patches/bin/mobileactivationd" "${MOUNT_POINT}/usr/libexec/mobileactivationd"
-    chmod 755 "${MOUNT_POINT}/usr/libexec/mobileactivationd"
-    echo "    [+] Installed authentic Apple platform binary mobileactivationd (stubbed main -> exit 0)"
+echo "[*] [3/6] Applying upstream hackios launchd architecture..."
+# 1. Disable /System/Library/xpc/launchd.plist
+# Crucial discovery: launchd.plist is Apple's embedded catalog of ~523 jobs.
+# If launchd.plist exists, launchd loads all 523 jobs and completely ignores LaunchDaemons!
+if [ -f "${MOUNT_POINT}/System/Library/xpc/launchd.plist" ]; then
+    echo "    [+] Disabling /System/Library/xpc/launchd.plist (forces launchd to read LaunchDaemons/)..."
+    mv -v "${MOUNT_POINT}/System/Library/xpc/launchd.plist" "${MOUNT_POINT}/System/Library/xpc/launchd.plist.disabled"
 fi
 
-# Restore plist if it was previously moved to .disabled
-if [ -f "${MOUNT_POINT}/System/Library/LaunchDaemons/com.apple.mobileactivationd.plist.disabled" ]; then
-    mv -v "${MOUNT_POINT}/System/Library/LaunchDaemons/com.apple.mobileactivationd.plist.disabled" \
-          "${MOUNT_POINT}/System/Library/LaunchDaemons/com.apple.mobileactivationd.plist"
+# 2. Disable NanoLaunchDaemons and LaunchAngels
+if [ -d "${MOUNT_POINT}/System/Library/NanoLaunchDaemons" ]; then
+    echo "    [+] Disabling /System/Library/NanoLaunchDaemons..."
+    mv -v "${MOUNT_POINT}/System/Library/NanoLaunchDaemons" "${MOUNT_POINT}/System/Library/NanoLaunchDaemons.disabled"
+fi
+if [ -d "${MOUNT_POINT}/System/Library/LaunchAngels" ]; then
+    echo "    [+] Disabling /System/Library/LaunchAngels..."
+    mv -v "${MOUNT_POINT}/System/Library/LaunchAngels" "${MOUNT_POINT}/System/Library/LaunchAngels.disabled"
 fi
 
+# 3. Clean and prune LaunchDaemons to only essential IOS_JOBS
 python3 - <<EOF
 import plistlib
 import os
 import shutil
 
 base = "${MOUNT_POINT}"
+ld_dir = os.path.join(base, "System/Library/LaunchDaemons")
+backup_dir = os.path.join(base, "System/Library/LaunchDaemons.stock_disabled")
+os.makedirs(backup_dir, exist_ok=True)
 
-# 1. SpringBoard: inject libredwood-sb.dylib
-sb_path = os.path.join(base, "System/Library/LaunchDaemons/com.apple.SpringBoard.plist")
-if os.path.exists(sb_path):
-    with open(sb_path, 'rb') as f:
-        sb = plistlib.load(f)
-    if 'EnvironmentVariables' not in sb:
-        sb['EnvironmentVariables'] = {}
-    sb['EnvironmentVariables']['DYLD_INSERT_LIBRARIES'] = '/usr/lib/libredwood-sb.dylib'
-    with open(sb_path, 'wb') as f:
-        plistlib.dump(sb, f, fmt=plistlib.FMT_XML)
-    print("    [+] Patched com.apple.SpringBoard.plist (DYLD_INSERT_LIBRARIES)")
+# Upstream canonical IOS_JOBS from hackios-xnu-userland (build.sh lines 99-107)
+essential_jobs = {
+    "com.apple.notifyd.plist",
+    "com.apple.cfprefsd.xpc.daemon.plist",
+    "com.apple.cfprefsd.xpc.daemon.system.plist",
+    "com.apple.logd.plist",
+    "com.apple.syslogd.plist",
+    "com.apple.distnoted.xpc.daemon.plist",
+    "com.apple.diagnosticd.plist",
+    "com.apple.fseventsd.plist",
+    "com.apple.containermanagerd.plist",
+    "com.apple.containermanagerd.system.plist",
+    "com.apple.runningboardd.plist",
+    "com.apple.backboardd.plist",
+    "com.apple.mobile.usermanagerd.plist",
+    "com.apple.mobilegestalt.xpc.plist",
+    "com.apple.lsd.plist",
+    "com.apple.powerd.plist",
+    "com.apple.analyticsd.plist",
+    "com.apple.logd_helper.plist",
+    "com.apple.iconservices.iconservicesagent.plist",
+    "com.apple.pluginkit.pkd.plist",
+    "com.apple.SpringBoard.plist",
+}
 
-# 2. backboardd: inject libredwood.dylib
-bb_path = os.path.join(base, "System/Library/LaunchDaemons/com.apple.backboardd.plist")
-if os.path.exists(bb_path):
-    with open(bb_path, 'rb') as f:
-        bb = plistlib.load(f)
-    if 'EnvironmentVariables' not in bb:
-        bb['EnvironmentVariables'] = {}
-    bb['EnvironmentVariables']['DYLD_INSERT_LIBRARIES'] = '/usr/lib/libredwood.dylib'
-    with open(bb_path, 'wb') as f:
-        plistlib.dump(bb, f, fmt=plistlib.FMT_XML)
-    print("    [+] Patched com.apple.backboardd.plist (DYLD_INSERT_LIBRARIES)")
+# Restore any essential plists that might have been moved to backup or disabled
+for d in [ld_dir, backup_dir]:
+    if os.path.isdir(d):
+        for f in os.listdir(d):
+            clean_name = f.replace(".disabled", "")
+            if clean_name in essential_jobs:
+                src_path = os.path.join(d, f)
+                dst_path = os.path.join(ld_dir, clean_name)
+                if src_path != dst_path:
+                    shutil.move(src_path, dst_path)
 
-# 3. Disable and unregister crashing daemons
-for daemon in ["com.apple.mobileactivationd.plist", "com.apple.watchdogd.plist"]:
-    d_path = os.path.join(base, "System/Library/LaunchDaemons", daemon)
-    if os.path.exists(d_path):
-        with open(d_path, 'rb') as f:
-            d = plistlib.load(f)
-        d['Disabled'] = True
-        d.pop('MachServices', None)
-        d.pop('LaunchEvents', None)
-        with open(d_path, 'wb') as f:
-            plistlib.dump(d, f, fmt=plistlib.FMT_XML)
-        disabled_path = d_path + ".disabled"
-        shutil.move(d_path, disabled_path)
-        print(f"    [+] Stripped MachServices and disabled {daemon}")
+# Move all non-essential plists to backup_dir
+kept = []
+stashed = 0
+for f in os.listdir(ld_dir):
+    if not f.endswith(".plist"):
+        continue
+    if f in essential_jobs:
+        kept.append(f)
+    else:
+        shutil.move(os.path.join(ld_dir, f), os.path.join(backup_dir, f))
+        stashed += 1
+
+print(f"    [+] Kept {len(kept)} essential launchd jobs in LaunchDaemons.")
+print(f"    [+] Stashed {stashed} non-essential background daemons to LaunchDaemons.stock_disabled.")
+
+# Configure the kept essential jobs
+for f in kept:
+    p = os.path.join(ld_dir, f)
+    try:
+        with open(p, 'rb') as fp:
+            job = plistlib.load(fp)
+        
+        # Route standard streams to /dev/console
+        job['StandardErrorPath'] = '/dev/console'
+        job['StandardOutPath'] = '/dev/console'
+        job.pop('_LimitLoadToDeviceTree', None)
+        
+        # SpringBoard injection
+        if f == "com.apple.SpringBoard.plist":
+            job.setdefault('EnvironmentVariables', {})['DYLD_INSERT_LIBRARIES'] = '/usr/lib/libredwood-sb.dylib'
+            print("    [+] Patched com.apple.SpringBoard.plist (DYLD_INSERT_LIBRARIES -> libredwood-sb.dylib)")
+            
+        # backboardd injection
+        if f == "com.apple.backboardd.plist":
+            job.setdefault('EnvironmentVariables', {})['DYLD_INSERT_LIBRARIES'] = '/usr/lib/libredwood.dylib'
+            print("    [+] Patched com.apple.backboardd.plist (DYLD_INSERT_LIBRARIES -> libredwood.dylib)")
+            
+        with open(p, 'wb') as fp:
+            plistlib.dump(job, fp, fmt=plistlib.FMT_XML)
+    except Exception as e:
+        print(f"    [-] Error patching {f}: {e}")
 EOF
 
 echo "[*] [4/6] Installing SetupDone and build 20H392 migration preferences..."
@@ -150,9 +198,15 @@ if fastboot devices | grep -q "fastboot"; then
 
     LOADER_IMG="${REPO_DIR}/baremetal_loader/felix_xnu_boot_v4.img"
     if [ -f "${LOADER_IMG}" ]; then
-        read -p "[?] Would you like to boot XNU now? (y/N): " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
+        SHOULD_BOOT=true
+        if [ -t 0 ]; then
+            read -p "[?] Would you like to boot XNU now? (Y/n): " -n 1 -r
+            echo
+            if [[ $REPLY =~ ^[Nn]$ ]]; then
+                SHOULD_BOOT=false
+            fi
+        fi
+        if [ "${SHOULD_BOOT}" = true ]; then
             echo "[*] Booting ${LOADER_IMG}..."
             fastboot boot "${LOADER_IMG}"
         fi

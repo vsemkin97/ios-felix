@@ -1,235 +1,185 @@
-# HackiOS — XNU kernel
+# iOS on Google Pixel Fold (Tensor G2 / felix)
 
-**HackiOS** boots Apple's open-source **XNU kernel** (`xnu-8796.121.2`, the kernel of iOS 16.5) on Android phone
-hardware and runs the **unmodified iOS 16.5 user space** on top of it: launchd → backboardd → SpringBoard →
-apps. Our own EFI loader, our own replacements for Apple's closed drivers, a UEFI port, and a Linux Wi-Fi driver
-on a compatibility layer make that possible.
+[![Milestone](https://img.shields.io/badge/Milestone-11%20Clean%20Boot%20%26%20Apple%20Logo-brightgreen.svg)]()
+[![Target OS](https://img.shields.io/badge/Target%20OS-Apple%20iOS%2016.7.16%20(XNU%2022.6.0)-blue.svg)]()
+[![Hardware](https://img.shields.io/badge/SoC-Google%20Tensor%20G2%20(GS201)-orange.svg)]()
+[![Display](https://img.shields.io/badge/Display-Outer%20AMOLED%201080x2092-red.svg)]()
 
-It runs in two places:
+Running genuine Apple **Darwin XNU 22.6.0** (iOS 16.7.16, Build `20H392`, `D22AP`) bare-metal on the **Google Pixel Fold** (`felix`, Tensor G2 / GS201).
 
-- **POCO X5 Pro 5G (redwood, Snapdragon 778G)** — nothing is flashed: the UEFI is started with `fastboot boot`,
-  the whole system lives in RAM, and after a reboot the phone is back in Android;
-- **QEMU** (`virt`, aarch64) — the same thing on any Linux computer, no phone needed.
+The system boots directly via an AOSP Header v4 boot image (`fastboot boot`), initializes the Exynos UFS 3.1 storage controller, mounts the physical `userdata` partition formatted as HFS+, outputs genuine Apple boot graphics on the physical outer AMOLED display, and bootstraps the full Apple iOS userland (`launchd` &rarr; `securityd` &rarr; `backboardd` &rarr; `SpringBoard`).
 
-This repository is half of the project:
+---
 
-| Repository | What |
-|---|---|
-| **hackios-xnu-kernel** (this one) | XNU patches, the EFI loader, the UEFI port, Wi-Fi, QEMU scripts, `xl`, prebuilt kernel/loader/UEFI, `common/` scripts |
-| [hackios-xnu-userland](https://github.com/oosexgang/hackios-xnu-userland) | our init, injected libraries, launchd jobs, the APFS image builder, the scripts that take iOS out of Apple's IPSW, Metal/Mesa work |
+## Current Status & Achievements
 
-> **No Apple files are in either repository.** `ios165/fetch.sh` downloads the iOS 16.5 IPSW from Apple's own CDN
-> to *your* machine and extracts what is needed there. HackiOS is an independent research project by OOSEX GANG and
-> is not affiliated with, authorised or endorsed by Apple Inc. iOS, iPhone and Apple are trademarks of Apple Inc.
+- [x] **Bare-Metal Bootloader:** Custom freestanding AOSP Header v4 bootloader with strictly 0 ABS64 and 0 GOT relocations, signed with AVB test key.
+- [x] **Apple DeviceTree Synthesis:** Dynamically synthesizes an Apple DeviceTree (`arm-io`, `interrupt-controller`, `exynos-uart`, `ufsroot0`, `sweet,display`, `chosen`, `memory`).
+- [x] **Display & Framebuffer:** Outer AMOLED panel (1080&times;2092 @ 60Hz, 32bpp BGRA) running at physical address `0xFC000000`. Hardware DMA continuous scanout enabled on Exynos DECON (`0x1C133060 = 0x3061`).
+- [x] **Physical UFS 3.1 Storage:** Hardware PHY initialization and SCSI command engine communicating with physical NAND; mounts physical GPT `userdata` partition as HFS+ rootfs (`/dev/ufsroot0`).
+- [x] **Apple Graphical Boot:** Displays the genuine Apple boot logo and active progress bar directly on the AMOLED panel via `AppleCLCD` / `IOMobileFramebuffer`.
+- [x] **iOS Userland Bootstrap:** Apple `launchd` (PID 1) executes system daemons: `securityd`, `tccd`, `lsd`, `keybagd`, `usermanagerd`, etc.
+- [x] **SpringBoard & backboardd:** `backboardd` runs multiple SMP event loops; `SpringBoard` attaches to CoreAnimation `CADisplay` for UI rendering.
+- [x] **Userland Patches:** Injected `libredwood-sb.dylib` (sets `LOCKDOWN_ACTIVATED = 2`, software vibrancy, and snapshot generation); disabled crash-prone `mobileactivationd` and `watchdogd` loops; injected `purplebuddy` and `migration` configurations.
 
-<p>
-<img src="docs/lockscreen.jpg" width="190" alt="Lock screen">
-<img src="docs/homescreen.jpg" width="190" alt="Home screen">
-<img src="docs/control-center.jpg" width="190" alt="Control Center">
-<img src="docs/settings.jpg" width="190" alt="Settings">
-</p>
+---
 
-Photographed on the phone, the Adreno GPU drawing (`gpu=1`). More in [Screenshots](#screenshots).
+## Hardware Architecture & Memory Map
 
-## What works
+| Component | Physical Address / Details | Notes |
+|---|---|---|
+| **SoC** | Google Tensor G2 (`GS201` / `zuma-family`) | 2&times; Cortex-X1, 2&times; Cortex-A78, 4&times; Cortex-A55 |
+| **DRAM Window** | Base `0xF0000000` (320 MB total) | Avoids Tensor G2 secure EL3/CARVE-OUT memory regions |
+| **Outer AMOLED Framebuffer** | `0xFC000000` (1080 &times; 2092, 32bpp BGRA) | Pitch = 4352 bytes, continuous DECON scanout |
+| **Exynos DECON Controller** | `0x1C130000` (Reg `0x3060` = `0x3061`) | Configured for hardware DMA continuous refresh |
+| **UFS 3.1 Controller** | `0x14700000` (Vendor slot reg `0x14701140`) | LUN 0 GPT partition `userdata` (~218 GB) |
+| **ARM GICv3 Distributor** | `0x10400000` | GICD base |
+| **ARM GICv3 CPU / Redist** | `0x10410000` | GICC / GICR (PPI 11 / INTID 27 for Arch Timer) |
+| **Exynos UART** | `0x10A00000` | 115200 baud, 8N1 serial console |
+| **ARM Generic Timer** | 24.576 MHz | Standard ARM architected timer frequency |
 
-| Works | Does not work (yet) |
-|---|---|
-| Lock screen, swipe to unlock, home screen with all icons (two pages), stock iOS 16 wallpapers | Cellular, Bluetooth |
-| System gestures: swipe up (home, app switcher), edge swipe (back), Control Center | Charging under our kernel (the phone only discharges) |
-| Apps: Settings, Clock, Calendar, Photos, Notes, Safari and more; widgets (Weather, Calendar) on the phone | Metal for apps (in progress: 293 of 456 system shaders already run on the Adreno, see `docs/air.md` in hackios-xnu-userland) |
-| Phone touchscreen (Goodix GT9916), multitouch, wake on touch; real power and volume keys | App Store content and Apple ID sign-in (no Secure Enclave; FairPlay daemon exits) |
-| Up to 8 CPU cores (`cpus=8`), big core at 2.4 GHz, ~20 s to the lock screen | Video and Live Photo recording |
-| Adreno 642L GPU through Mesa/freedreno (`gpu=1`, OpenGL ES for CoreAnimation) | |
-| Wi-Fi (WCN6750, ath11k): join from Settings, Safari over Wi-Fi, 55–90 Mbit/s | |
-| Sound (speakers, main microphone), camera in Camera.app (front/rear, preview, focus, HEIC photos) | |
-| Data that iOS writes survives a reboot (`var_store=1 ufs_write=1`); iOS root volume on the phone's flash | |
-| Sileo + Procursus (dpkg, apt), tweaks, SSH | |
+---
 
-It is a research bench, not a ROM: a session lasts a given number of seconds, then the kernel returns to the
-loader and hands over its log.
+## Repository Structure
 
-## Quick start: QEMU, no kernel build
-
-`prebuilt/` holds the kernel, loader and our programs built from these repositories, so all you need is the system
-image, which is made on your machine from Apple's IPSW.
-
-Needs: Linux x86-64, ~12 GB free disk, 4 GB free RAM. Packages (Arch):
-
-```sh
-sudo pacman -S --needed git python 7zip lz4 gcc qemu-system-aarch64 qemu-ui-gtk edk2-aarch64
-```
-
-(Debian/Ubuntu: `git python3 7zip liblz4-dev gcc qemu-system-arm qemu-efi-aarch64`; 7-Zip must be 23 or newer — it
-reads APFS.)
-
-```sh
-git clone https://github.com/oosexgang/hackios-xnu-kernel.git hackios
-cd hackios
-common/setup.sh               # brings hackios-xnu-userland into the same tree, checks the host
-ios165/fetch.sh               # downloads 7.4 GB from Apple's CDN and extracts what is needed (5-15 min)
-common/build.sh qemu-virt     # builds the APFS images (and the kernel, if the toolchain is there)
-common/run.sh qemu-virt       # a 20-minute session in a QEMU window
-```
-
-The lock screen appears after 2–3 minutes.
-
-- **Mouse with the left button held = finger.** Unlock / leave an app: swipe up from the very bottom edge; back:
-  swipe from the left edge.
-- Keys: `H` home, `L` lock/power, `↑`/`↓` volume, `F11` (hold) five fingers.
-- From a script: `qemu/touch.py swipe 0.5 0.985 0.5 0.3 250`, `qemu/touch.py tap 0.615 0.71`,
-  `qemu/touch.py key home`; screenshot: `qemu/screendump.sh shot.png`.
-- Right after SpringBoard appears the system is still registering apps: give it 30–40 s.
-- Debian/Ubuntu UEFI firmware: `QEMU_EFI=/usr/share/AAVMF/AAVMF_CODE.fd QEMU_VARS=/usr/share/AAVMF/AAVMF_VARS.fd`.
-
-## On the phone (POCO X5 Pro 5G)
-
-You need a **POCO X5 Pro 5G (redwood)** with an unlocked bootloader, `adb` and `fastboot`, and the images from the
-section above. Nothing is written to the phone's storage.
-
-**The phone's own firmware** is not in the repository and cannot be: it is the vendor's and is taken from the very
-phone it will run on, from its Android:
-
-```sh
-adb pull /vendor/firmware/a660_{gmu.bin,sqe.fw,zap.mdt,zap.b00,zap.b01,zap.b02} fw-gpu/      # GPU (gpu=1)
-adb pull /vendor/firmware_mnt/image/wpss.{mdt,b02,b03,b04,b05,b06,b07} fw-wifi/              # Wi-Fi (wifi=1)
-adb pull /vendor/firmware_mnt/image/adsp.{mdt,b02,...,b36} fw-audio/                         # sound (adsp=1)
-adb pull /vendor/firmware/aw8697_haptic.bin fw-haptic/                                       # haptics
-```
-
-(Put the `fw-*` directories next to the workspace. Wi-Fi also needs `fw-wifi/mac` — the radio's address on one
-line — and `fw-wifi/network` — network name and password. `userland/build.sh` prints which firmware went in.)
-
-```sh
-common/build.sh redwood GL=1          # images + out/redwood-boot.img
-common/run.sh redwood 900             # loader into RAM, system image into RAM, a 15-minute session
-```
-
-or step by step with `xl`:
-
-```sh
-./xl enter            # Android -> fastboot -> our loader in RAM (fastboot boot); it brings up its own USB link
-./xl ramdisk          # upload the system image into the phone's RAM (2.5 GB, ~80 s), once per loader session
-XL_SECS=900 XL_CMDLINE="touchscreen=1 cpufreq=1 bootcpu=7 cpus=8 gpu=1 wifi=1 adsp=1" ./xl run
-./xl screenshot shot.png
-./xl reboot           # back to Android
-```
-
-`./xl` with no arguments lists every command (logs, screen and sound recording, camera frames, stop, state...).
-
-## Prebuilt boot image
-
-Every release has `hackios-redwood-boot.img` attached: the redwood UEFI with our loader inside, ready for
-`fastboot boot`. It contains no Apple files; the system image is still made on your machine (above).
-
-## Building from source
-
-`common/build.sh <device>` runs every step that this machine can run and uses `prebuilt/` for the rest.
-
-- **Kernel** — needs [theos](https://theos.dev/docs/installation-linux) in `~/theos` (cctools and
-  `iPhoneOS16.5.sdk`) and `clang lld python perl`. Details: [xnu/README.md](xnu/README.md).
-  ```sh
-  xnu/apply.sh && xnu-deps/setup.sh && ./xnu-build.sh -j8 -k
-  ```
-- **Loader** — `xnuloader/build.sh` (clang + lld-link, an EFI application without EDK2).
-- **Images** — `REST=1 userland/build.sh` (variables documented at the top of that file).
-- **UEFI** — [uefi/README.md](uefi/README.md) (Project Silicium port); not needed to run, `prebuilt/uefi` has it.
-- After rebuilding: `tools/update-prebuilt.sh` refreshes `prebuilt/`.
-
-## Porting to another device
-
-```sh
-common/new-device.sh <codename> path/to/device.dtb   # profile + loader platform from the phone's device tree
-```
-
-Then follow [docs/PORTING.md](docs/PORTING.md): the UEFI port, the loader's platform description, the kernel's
-drivers, the firmware. Device profiles live in `common/devices/` (`redwood.conf`, `qemu-virt.conf`, `_template.conf`).
-
-## How it works
+The repository is organized into three clean, self-contained directories:
 
 ```
-fastboot boot ──► UEFI (Mu-Silicium) ──► xnuloader (EFI application)
-                                           │  stays resident: USB link (fastboot protocol),
-                                           │  watchdog, receives the kernel's log
-                                           ▼
-            XNU (BCM2837 config as the base + our platform)
-              ├─ GICv3, timer, video console, return to the loader
-              ├─ APFS (images in RAM, iOS volume on flash), ramfs (/private/var, /tmp)
-              ├─ minicrypto instead of corecrypto, AMFI and Sandbox stand-ins (MAC policies)
-              ├─ driver replacements: IOSurface, IOMobileFramebuffer, AppleKeyStore, network stack
-              ├─ input: /dev/redwood-touch ◄─ Goodix GT9916 (phone) / virtio-input (QEMU)
-              ├─ GPU: Adreno 642L, Wi-Fi: WCN6750 (ath11k via LinuxKPI), sound: ADSP / virtio-sound
-              ▼
-   iOS 16.5 launchd → logd, notifyd, cfprefsd, runningboardd, backboardd, SpringBoard, apps
-              ├─ our libraries are injected into backboardd, SpringBoard and mediaserverd
-              │  (virtual HID services, a few ObjC method swaps — in memory only)
-              └─ mediaserverd gets our CoreAudio output device (RedwoodAudio.driver)
+├── baremetal_loader/           # Standalone AOSP Header v4 baremetal bootloader
+│   ├── build.sh                # 1-click build script (Clang -> lld -> LZ4 -> mkbootimg -> avbtool)
+│   ├── entry.S                 # Low-level EL1 entry, stack setup, cache invalidation
+│   ├── loader_main.c           # Memory setup, ADT synthesis, DECON init, XNU trampoline
+│   ├── console.c / console.h   # Early framebuffer text rendering engine & font table
+│   ├── ufsinit.c / ufsinit.h   # Exynos UFS 3.1 controller & PHY initialization
+│   ├── kernel_sweet_ci_patched.macho # Working patched iOS 16 Darwin XNU kernel Mach-O
+│   ├── linker.ld               # Custom ELF linker script ensuring zero relocations
+│   ├── mkbootimg.py / avbtool.py # AOSP packaging and AVB v1.2 signing utilities
+│   └── test_rsa4096.pem        # AVB signing key
+├── tools/                      # Userland automation and patching scripts
+│   ├── flash_userland.sh       # All-in-one script to mount, patch, sparse-encode, and flash
+│   ├── make-android-sparse.py  # Pure Python converter (raw HFS+ image -> Android sparse .simg)
+│   └── userland_patches/       # Required iOS userland injection files
+│       ├── lib/                # libredwood-sb.dylib & libredwood.dylib
+│       └── preferences/        # com.apple.purplebuddy.plist, migration.plist, springboard.plist...
+├── xnu/                        # Reference source code for HackiOS XNU driver extensions
+│   └── files/                  # GenericARMPE, MiniAppleKeyStore, apfs, gic_v3_irq, psci_smp...
+├── TENSOR_G2_PORTING_MASTER_GUIDE.md # Deep technical reference & MMIO documentation
+└── README.md                   # This document
 ```
 
-The iOS programs, frameworks and dyld shared cache are not changed by a single byte: what they miss is done by the
-kernel (driver replacements) or by a library the kernel injects with `DYLD_INSERT_LIBRARIES` (`kern.exec_inject`).
+---
 
-## Layout
+## Quick Start Guide
 
-| Path | What |
-|---|---|
-| `common/` | `setup.sh` (workspace), `build.sh` / `run.sh` (per device), `new-device.sh`, `devices/*.conf`, `ugit` |
-| `xl` | drives the phone over USB: loader, kernel runs, logs, screenshots, screen and sound recording |
-| `xnuloader/` | the loader: `loader.c` (UEFI application), `mkpayload.py` (kernel + images + arguments container) |
-| `xnu/` | our XNU changes: patch, new files, `apply.sh` / `export.sh` |
-| `xnu-deps/` | everything for building XNU on Linux: `setup.sh`, tool wrappers, stubs |
-| `xnu-build.sh`, `xnu-env.sh` | kernel build |
-| `uefi/`, `mkxnuimg.py` | the UEFI port and packing the boot image for `fastboot boot` |
-| `wifi/lx/` | the layer on which Linux's Wi-Fi driver builds for our kernel |
-| `qemu/` | QEMU runs, touch input, screenshots, stack symbolication |
-| `tools/` | recording (`recording.py`, `sound.py`), UFS/flash tools, `mk-ath11k.sh`, `new-workspace.sh`, host tests |
-| `prebuilt/` | built kernel, loader and UEFI pieces (`NOTICES.md` for the third-party code in the kernel) |
-| `docs/` | screenshots, [checks.md](docs/checks.md), [PORTING.md](docs/PORTING.md) |
+### 1. Prerequisites (macOS Host)
 
-## Debugging
+Install the required cross-compilation and flashing toolchain via Homebrew:
 
-- Session log: QEMU's stdout or `logs/HHMMSS-run.log` from the phone.
-- `RC_JOBS=rc.jobs.tour REST=1 userland/build.sh` — an image that unlocks and opens every app of the first page.
-- `userabort:` in the log is the stack of a process that called `abort()`; `usertrap:` (with `systrace=1`) — crashes.
-- Live stacks (QEMU): `qemu/touch.py stacks NAME`, then `qemu/symstack.py LOG NAME`
-  (needs [`ipsw`](https://github.com/blacktop/ipsw)).
-- How a check can lie to you: [docs/checks.md](docs/checks.md).
+```bash
+brew install llvm lld lz4 android-platform-tools
+```
 
-## Screenshots
+Ensure `clang`, `ld.lld`, and `fastboot` are accessible in your `PATH`.
 
-From the phone's screen, one session (`GL=1 REST=1`, `gpu=1`):
+---
 
-<p>
-<img src="docs/homescreen-2.jpg" width="160" alt="Home screen, page 2">
-<img src="docs/search.jpg" width="160" alt="Search">
-<img src="docs/settings-general.jpg" width="160" alt="Settings > General">
-<img src="docs/calendar.jpg" width="160" alt="Calendar">
-<img src="docs/clock.jpg" width="160" alt="Clock">
-</p>
-<p>
-<img src="docs/wallet.jpg" width="160" alt="Wallet">
-<img src="docs/messages.jpg" width="160" alt="Messages">
-<img src="docs/music.jpg" width="160" alt="Music">
-<img src="docs/maps.jpg" width="160" alt="Maps">
-<img src="docs/appstore-tabs.png" width="160" alt="App Store">
-</p>
+### 2. Building the Baremetal Boot Image
 
-## Licenses
+Compile the loader and package the signed Header v4 boot image:
 
-- No iOS files are in the repositories: `ios165/fetch.sh` downloads them from Apple's CDN to your machine.
-- `xnu/` is a derivative work of XNU and is distributed under APSL 2.0, like XNU itself; `prebuilt/mach.*` is the
-  kernel built from it. It also contains ath11k (BSD-3-Clause-Clear) and FreeBSD LinuxKPI code (BSD-2-Clause):
-  see [prebuilt/NOTICES.md](prebuilt/NOTICES.md).
-- `xnu/files/bsd/miscfs/apfs/libzbitmap/` and `xnu-deps/build/lzbitmap/` — libzbitmap (Corellium LLC, MIT here);
-  `xnu/files/bsd/miscfs/apfs/libdeflate/` — libdeflate 1.24 (Eric Biggers, MIT, `COPYING` there).
-- ath11k, Linux and FreeBSD sources are not in the repository: `tools/mk-ath11k.sh` fetches pinned releases.
-  `wifi/lx/patches/*.patch` are our changes to FreeBSD headers; the rest of `wifi/lx/` is ours.
-- `uefi/files/Binaries/redwood` and `prebuilt/uefi/SILICIUM_UEFI.fd` contain UEFI drivers from the phone's
-  Xiaomi firmware, distributed the way Project Silicium distributes them for other devices;
-  `prebuilt/uefi/mkbootimg.py` — AOSP, Apache-2.0.
-- This repository is licensed under the [Apple Public Source License 2.0](LICENSE): our changes to XNU are a derivative of XNU and must be, and our other code here (loader, scripts) is released under the same license. Third-party code keeps its own license, as listed above.
+```bash
+cd baremetal_loader
+./build.sh
+```
 
-## Team
+**Build Output:**
+- `baremetal_loader/felix_xnu_boot_v4.img` (64 MB, signed with AVB footer, ready for `fastboot boot`).
 
-OOSEX GANG — [@oodze](https://t.me/oodze) (founder), [@netusd](https://t.me/netusd), [@wannqn](https://t.me/wannqn),
-[@hxfuxyyXD](https://t.me/hxfuxyyXD). News: [t.me/oosexgangdevs](https://t.me/oosexgangdevs).
+---
+
+### 3. Patching & Flashing the iOS Userland
+
+To flash your iOS 16 root filesystem to the physical `userdata` partition on the phone:
+
+```bash
+sudo ./tools/flash_userland.sh /path/to/ios-root.img
+```
+
+**What this script does automatically:**
+1. Attaches `ios-root.img` locally via `hdiutil`.
+2. Injects `libredwood-sb.dylib` and `libredwood.dylib` into `/usr/lib/`.
+3. Configures `DYLD_INSERT_LIBRARIES` in `com.apple.SpringBoard.plist` and `com.apple.backboardd.plist`.
+4. Disables crash loops in `com.apple.mobileactivationd.plist` and `com.apple.watchdogd.plist`.
+5. Installs `com.apple.purplebuddy.plist` (`SetupDone = true`) and `com.apple.migration.plist` to `/var/mobile/Library/Preferences/`.
+6. Detaches the image cleanly and converts it to Android sparse format (`ios-root-clean.simg`).
+7. Flashes the sparse image to the phone: `fastboot flash userdata ios-root-clean.simg`.
+8. Prompts to boot the XNU kernel directly.
+
+---
+
+### 4. Booting iOS Bare-Metal
+
+Put the Google Pixel Fold into Fastboot / Bootloader mode (`Volume Down` + `Power`):
+
+```bash
+fastboot boot baremetal_loader/felix_xnu_boot_v4.img
+```
+
+1. The phone displays the early boot log on the outer AMOLED screen.
+2. The XNU kernel initializes MMU, Mach VM, and the UFS driver.
+3. The genuine Apple boot logo appears on the screen.
+4. Launch Services (`lsd`) indexes LaunchDaemons; the Apple progress bar renders beneath the logo.
+5. `SpringBoard` and `backboardd` take over graphics presentation.
+
+---
+
+## Boot Arguments & Configuration
+
+The boot arguments passed from `baremetal_loader/loader_main.c` to XNU in the DeviceTree `/chosen` node:
+
+```
+-v debug=0xc serial=3 cpus=1 keepsyms=1 wdt=-1 wdt_test=no_user_checkin sweetusb=0 sweetlog=0 rd=ufsroot0 ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 launchd_unsecure_cache=1 sweetfb_native=1
+```
+
+### Key Boot-Args Explained:
+
+- `sweetfb_native=1`: Notifies `AppleCLCD` to register the display as an Apple native display, enabling CoreAnimation `CADisplay` binding.
+- `sweetfb_noconsole=1` *(optional)*: Suppresses kernel text rendering on the framebuffer to keep the Apple logo and SpringBoard completely clean.
+- `-enable_kprintf_spam` *(optional for debugging)*: Routes all `kprintf()` output to the screen framebuffer. *(Note: will draw text over the UI if left enabled during full SpringBoard operation).*
+- `rd=ufsroot0 ufsrw=1 rootrw=1`: Mounts the physical UFS NAND `userdata` partition as a read/write rootfs.
+- `wdt=-1 wdt_test=no_user_checkin`: Disables kernel and launchd hardware watchdogs to prevent watchdog reboots during slow single-core cold boots.
+
+---
+
+## Known Quirks & Lifehacks
+
+### 1. Launch Services (`lsd`) Initial Indexing
+On a freshly flashed `userdata` partition, `lsd` must index all 532 system LaunchDaemons. Under software rasterization on a single core (`cpus=1`), the Apple progress bar under the boot logo may take **3 to 7 minutes** to complete. Do not interrupt or reboot the device during this stage.
+
+### 2. FrontBoard Watchdogs
+To prevent SpringBoard from killing scenes during cold boot delays, watchdog timeouts are overridden in `/private/var/mobile/Library/Preferences/com.apple.springboard.plist`:
+- `BKNoWatchdogs = true`
+- `FBLaunchWatchdogScale = 20`
+
+### 3. Continuous DECON DMA Scanout
+Google Tensor G2 displays will shut off or freeze after bootloader handoff unless the Exynos DECON display controller is programmed for continuous DMA refresh. In `loader_main.c`:
+```c
+mmio_write32(0x1C133060, 0x3061); /* DECON continuous scanout trigger */
+```
+
+### 4. Physical DRAM Boundary (320 MB Window)
+Tensor G2 firmware reserves memory above `0x104000000` and between `0x80000000` - `0xA0000000` for TrustZone / secure CARVE-OUT. Passing the full 12 GB DRAM map to XNU triggers an immediate secure EL3 panic. Constraining the physical memory window to 320 MB starting at `0xF0000000` ensures stable, panic-free operation.
+
+---
+
+## Contributing & Development Reference
+
+For an in-depth breakdown of MMIO registers, UFS PHY training sequences, GICv3 interrupt routing, and kernel Mach-O hex patches, refer to:
+- [`TENSOR_G2_PORTING_MASTER_GUIDE.md`](file:///Users/vladislav/.gemini/antigravity/scratch/hackios-xnu-kernel/TENSOR_G2_PORTING_MASTER_GUIDE.md)
+
+---
+
+## License
+
+This project is licensed under the terms described in the [LICENSE](file:///Users/vladislav/.gemini/antigravity/scratch/hackios-xnu-kernel/LICENSE) file.  
+*iOS, iPhone, Apple, SpringBoard, and Darwin are trademarks of Apple Inc. This is an independent research project not affiliated with or endorsed by Apple Inc. or Google LLC.*

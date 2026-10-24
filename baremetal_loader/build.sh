@@ -42,7 +42,7 @@ echo "=== [5/6] Compressing with LZ4 (Legacy format) ==="
 lz4 -l -12 -f Image Image.lz4
 
 echo "=== [6/6] Packaging Header v4 Boot Image & Adding AVB Signature ==="
-python3 ../prebuilt/uefi/mkbootimg.py \
+python3 mkbootimg.py \
   --header_version 4 \
   --kernel Image.lz4 \
   -o felix_xnu_boot_v4.img

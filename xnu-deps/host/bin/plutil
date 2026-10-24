@@ -1,3 +1,0 @@
-#!/bin/sh
-# no-op plutil: plists stay XML
-exit 0
